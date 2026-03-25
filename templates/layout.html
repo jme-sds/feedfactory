@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html data-theme="dark">
+<head>
+    <title>Feed Factory</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+    <!-- Adds support for modern mobile safe areas -->
+    <meta name="theme-color" content="#141414">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@1/css/pico.min.css">
+    <script src="https://unpkg.com/htmx.org@1.9.6"></script>
+    <style>
+        /* --- GLOBAL TOP NAVBAR --- */
+        .global-nav { position: sticky; top: 0; z-index: 1000; background: #141414; border-bottom: 1px solid #333; padding: 0.5rem 1rem; margin-bottom: 2rem; }
+        .nav-badge-btn { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid #555; color: #fff; cursor: pointer; padding: 0; margin: 0; transition: all 0.2s; }
+        .nav-badge-btn:hover { background: rgba(255,255,255,0.1); border-color: var(--primary); color: var(--primary); }
+        .nav-badge-btn.active { background: rgba(16, 149, 193, 0.2); border-color: var(--primary); color: var(--primary); }
+        
+        /* Remove dropdown arrows */
+        details.nav-dropdown summary { list-style: none !important; }
+        details.nav-dropdown summary::-webkit-details-marker { display: none !important; }
+        details.nav-dropdown summary::after { display: none !important; content: none !important; background-image: none !important; }
+        details.nav-dropdown[open] summary { margin-bottom: 0 !important; }
+
+        /* --- NEW: BOTTOM NAVIGATION BAR --- */
+        .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(20, 20, 20, 0.95); backdrop-filter: blur(10px); border-top: 1px solid #333; z-index: 1000; display: flex; justify-content: space-around; padding: 0.5rem 0; padding-bottom: calc(0.5rem + env(safe-area-inset-bottom)); }
+        .bottom-nav-item { display: flex; flex-direction: column; align-items: center; color: #888; text-decoration: none; font-size: 0.75rem; transition: color 0.2s; gap: 4px; }
+        .bottom-nav-item:hover, .bottom-nav-item.active { color: var(--primary); }
+        .bottom-nav-icon { width: 24px; height: 24px; stroke: currentColor; stroke-width: 2; fill: none; }
+        
+        /* Prevent content from hiding behind the bottom navbar */
+        body { padding-bottom: 80px; }
+    </style>
+</head>
+<body>
+
+    <!-- TOP STICKY NAVBAR (Hamburger menu removed) -->
+    <nav id="top-nav" class="container-fluid global-nav">
+        <ul>
+            <!-- Logo now flush left -->
+            <li style="padding-left: 0;"><strong>
+                <a href="/" class="contrast" style="text-decoration: none; display: flex; align-items: center; gap: 10px;">
+                    <img src="/static/logo.svg" alt="Feed Factory Logo" style="width: 28px; height: 28px; object-fit: contain; filter: brightness(0) invert(1);"> Feed Factory
+                </a>
+            </strong></li>
+        </ul>
+        
+        <ul style="gap: 8px; align-items: center;">
+            <li id="cat-filter-container" style="display: none; margin: 0;">
+                <button class="nav-badge-btn" id="cat-filter-btn" onclick="toggleCategoryFilter()" title="Hide Empty Categories">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
+                </button>
+            </li>
+            
+            <li id="cat-sort-container" style="display: none; margin: 0;">
+                <details class="dropdown nav-dropdown" style="margin: 0; position: relative;">
+                    <summary class="nav-badge-btn" title="Sort Categories">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>
+                    </summary>
+                    <div style="position: absolute; right: 0; top: 100%; margin-top: 10px; width: 180px; background: #1a1a1a; border: 1px solid #444; border-radius: 8px; padding: 0.5rem; z-index: 100; box-shadow: 0 8px 32px rgba(0,0,0,0.9);">
+                        <a href="#" style="display: block; padding: 8px; color: #fff; text-decoration: none; border-radius: 4px;" onclick="sortCategories('alpha'); closeNavDropdowns(); return false;">🔤 Alphabetical</a>
+                        <a href="#" style="display: block; padding: 8px; color: #fff; text-decoration: none; border-radius: 4px;" onclick="sortCategories('unread'); closeNavDropdowns(); return false;">🔥 Most Unread</a>
+                        <a href="#" style="display: block; padding: 8px; color: #fff; text-decoration: none; border-radius: 4px;" onclick="sortCategories('newest'); closeNavDropdowns(); return false;">🕒 Newest Article</a>
+                    </div>
+                </details>
+            </li>
+
+            <!-- The Main App 3-Dot Settings Menu -->
+            <li style="margin: 0; margin-left: 5px; position: relative;">
+                <details class="dropdown nav-dropdown" style="margin: 0;">
+                    <summary role="button" class="secondary outline nav-badge-btn" style="border: none;" title="Menu">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg>
+                    </summary>
+                    
+                    <div style="position: absolute; right: 0; top: 100%; margin-top: 10px; width: 180px; background: #1a1a1a; border: 1px solid #444; border-radius: 8px; padding: 0.5rem; z-index: 100; box-shadow: 0 8px 32px rgba(0,0,0,0.9);">
+                        <a href="#" style="display: block; padding: 8px; color: #fff; text-decoration: none; border-radius: 4px; text-align: left;" onclick="openAddCategoryModal(); closeNavDropdowns(); return false;">📁 Create Category</a>
+                        <a href="#" style="display: block; padding: 8px; color: #fff; text-decoration: none; border-radius: 4px; text-align: left;" onclick="openAddFeedModal(); closeNavDropdowns(); return false;">➕ Add Feed</a>
+                        <a href="#" style="display: block; padding: 8px; color: #fff; text-decoration: none; border-radius: 4px; text-align: left;" onclick="openImportModal(); closeNavDropdowns(); return false;">📥 Import Feeds</a>
+                        <a href="/subscriptions/export.opml" target="_blank" download="subscriptions.opml" style="display: block; padding: 8px; color: #fff; text-decoration: none; border-radius: 4px; text-align: left;" onclick="closeNavDropdowns();">📤 Export Feeds</a>
+                        <hr style="margin: 0.5rem 0; border-color: #333;">
+                        <a href="#" style="display: block; padding: 8px; color: #d93526; text-decoration: none; border-radius: 4px; text-align: left;" onclick="forceSyncAll(); closeNavDropdowns(); return false;">🔄 Force Sync All</a>
+                    </div>
+                </details>
+            </li>
+        </ul>
+    </nav>
+
+    <!-- MAIN CONTENT AREA -->
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- NEW: BOTTOM NAVIGATION BAR -->
+    <nav class="bottom-nav">
+        <!-- Reader / Home -->
+        <a href="/" class="bottom-nav-item {% if request.url.path == '/' %}active{% endif %}">
+            <svg class="bottom-nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"></path></svg>
+            Reader
+        </a>
+        
+        <!-- Generator / Collections -->
+        <a href="/collections" class="bottom-nav-item {% if '/collections' in request.url.path %}active{% endif %}">
+            <svg class="bottom-nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8l-7-5V2a2 2 0 0 0-2-2H9a2 2 0 0 0-2 2v1H4a2 2 0 0 0-2 2Z"></path><path d="M17 18h1"></path><path d="M13 18h1"></path><path d="M9 18h1"></path></svg>
+            Generator
+        </a>
+        
+        <!-- Settings -->
+        <a href="/settings" class="bottom-nav-item {% if '/settings' in request.url.path %}active{% endif %}">
+            <svg class="bottom-nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            Settings
+        </a>
+    </nav>
+
+    <!-- CREATE CATEGORY MODAL -->
+    <dialog id="add-category-modal">
+        <article style="max-width: 500px;">
+            <header>
+                <a href="#close" aria-label="Close" class="close" onclick="document.getElementById('add-category-modal').close(); return false;"></a>
+                <strong>📁 Create New Category</strong>
+            </header>
+            <form hx-post="/categories/add" onsubmit="document.getElementById('add-category-modal').close()">
+                <label>Category Name
+                    <input type="text" name="name" required placeholder="e.g. Tech News">
+                </label>
+                <div style="text-align: right; margin-top: 1rem;">
+                    <button type="submit" class="outline btn-sm">Create</button>
+                </div>
+            </form>
+        </article>
+    </dialog>
+
+    <!-- ADD FEED MODAL -->
+    <dialog id="add-feed-modal">
+        <article style="max-width: 500px;">
+            <header>
+                <a href="#close" aria-label="Close" class="close" onclick="document.getElementById('add-feed-modal').close(); return false;"></a>
+                <strong>➕ Add New Feed</strong>
+            </header>
+            <form hx-post="/subscriptions/add" onsubmit="document.getElementById('add-feed-modal').close()">
+                <label>RSS Feed URL
+                    <input type="url" name="url" required placeholder="https://example.com/feed.xml">
+                </label>
+                <label>Assign to Category (Optional)
+                    <select id="add-feed-cat-select" name="category_id" hx-get="/components/category_options" hx-trigger="fetch-options">
+                        <option value="none">Loading...</option>
+                    </select>
+                </label>
+                <div style="text-align: right; margin-top: 1rem;">
+                    <button type="submit" class="outline btn-sm">Subscribe</button>
+                </div>
+            </form>
+        </article>
+    </dialog>
+
+    <!-- CHANGE CATEGORY MODAL -->
+    <dialog id="change-category-modal">
+        <article style="max-width: 500px;">
+            <header>
+                <a href="#close" aria-label="Close" class="close" onclick="document.getElementById('change-category-modal').close(); return false;"></a>
+                <strong>🔄 Change Category</strong>
+            </header>
+            <form id="change-category-form" hx-post="" onsubmit="document.getElementById('change-category-modal').close()">
+                <label>Select New Category
+                    <select id="change-cat-select" name="category_id" hx-get="/components/category_options" hx-trigger="fetch-options">
+                        <option value="none">Loading...</option>
+                    </select>
+                </label>
+                <div style="text-align: right; margin-top: 1rem;">
+                    <button type="submit" class="outline btn-sm">Move Feed</button>
+                </div>
+            </form>
+        </article>
+    </dialog>
+
+    <!-- IMPORT OPML MODAL -->
+    <dialog id="import-opml-modal">
+        <article style="max-width: 500px;">
+            <header>
+                <a href="#close" aria-label="Close" class="close" onclick="document.getElementById('import-opml-modal').close(); return false;"></a>
+                <strong>📥 Import Feeds (OPML)</strong>
+            </header>
+            <form hx-post="/subscriptions/import_opml" hx-target="#reader-container" hx-encoding="multipart/form-data" onsubmit="document.getElementById('import-opml-modal').close()">
+                <label>Select OPML File
+                    <input type="file" name="file" accept=".xml,.opml" required>
+                </label>
+                <div style="text-align: right; margin-top: 1rem;">
+                    <button type="submit" class="outline btn-sm">Import File</button>
+                </div>
+            </form>
+        </article>
+    </dialog>
+
+    <!-- SCRIPTS -->
+    <script>
+        function closeNavDropdowns() {
+            document.querySelectorAll('.nav-dropdown').forEach(d => d.removeAttribute('open'));
+        }
+
+        function openAddCategoryModal() { document.getElementById('add-category-modal').showModal(); }
+        
+        function openAddFeedModal() { 
+            htmx.trigger('#add-feed-cat-select', 'fetch-options');
+            document.getElementById('add-feed-modal').showModal(); 
+        }
+
+        function openImportModal() { document.getElementById('import-opml-modal').showModal(); }
+
+        function openChangeCategoryModal(subId) {
+            htmx.trigger('#change-cat-select', 'fetch-options');
+            const form = document.getElementById('change-category-form');
+            form.setAttribute('hx-post', `/subscriptions/${subId}/change_category`);
+            htmx.process(form);
+            document.getElementById('change-category-modal').showModal();
+        }
+
+        function forceSyncAll() {
+            fetch('/reader/force_sync', { method: 'POST' })
+                .then(() => alert('Background sync triggered! Articles will appear shortly.'));
+        }
+
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js');
+            });
+        }
+    </script>
+</body>
+</html>
+
+
+

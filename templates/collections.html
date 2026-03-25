@@ -1,0 +1,398 @@
+{% extends "layout.html" %}
+
+{% block title %}Collections{% endblock %}
+
+{% block actions %}
+    <li style="padding: 0;">
+        <details class="dropdown nav-menu" style="margin: 0;" name="nav-menu-group">
+            <summary role="button">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg>
+            </summary>
+            <ul dir="rtl">
+                <li><a href="#" onclick="document.getElementById('add-col-modal').showModal(); this.closest('details').removeAttribute('open');">New Collection</a></li>
+                <li><a href="#" hx-post="/collections/trigger_all" onclick="this.closest('details').removeAttribute('open');">Run All Summaries</a></li>
+            </ul>
+        </details>
+    </li>
+{% endblock %}
+
+{% block content %}
+
+    <style>
+        /* --- NAV MENU OVERRIDES --- */
+        .nav-menu { position: relative; }
+        .nav-menu summary { 
+            padding: 4px; margin: 0; border: none !important; background: transparent !important; 
+            color: #fff; display: flex; align-items: center; justify-content: center; 
+            box-shadow: none !important; outline: none !important; 
+            width: 36px; height: 36px; border-radius: 50% !important;
+        }
+        .nav-menu summary:hover { background: rgba(255,255,255,0.1) !important; color: var(--primary); }
+        .nav-menu[open] summary { color: var(--primary); }
+        .nav-menu summary::after { display: none !important; }
+
+        .nav-menu ul {
+            background: #141414 !important; border: 1px solid #444 !important;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.8) !important; border-radius: 8px !important;
+            padding: 0.5rem !important; width: 180px; position: absolute;
+            right: 0; left: auto; top: 100%; margin-top: 8px; z-index: 1000; text-align: left;
+            display: block !important; 
+        }
+        .nav-menu ul li { display: block !important; margin: 0; padding: 0; }
+        .nav-menu ul li a { 
+            display: block; padding: 0.5rem 0.8rem; border-radius: 4px; 
+            color: #ddd !important; font-size: 0.9rem; text-decoration: none; 
+            transition: background 0.1s; border: none !important;
+        }
+        .nav-menu ul li a:hover { background: #2a2a2a !important; color: #fff !important; }
+
+        /* --- GRID & TILE OVERRIDES --- */
+        .category-grid {
+            display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-bottom: 2rem;
+        }
+        .cat-tile {
+            background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 2.5rem 0.5rem 2.5rem 0.5rem; 
+            text-align: center; cursor: pointer; transition: all 0.2s; display: flex; flex-direction: column; 
+            justify-content: center; align-items: center; position: relative; z-index: 1; 
+        }
+        .cat-tile:hover { border-color: var(--primary); background: #1f2d33; transform: translateY(-2px); z-index: 10; }
+        .cat-tile:has(details[open]) { z-index: 20; }
+        
+        .cat-name { font-weight: bold; font-size: 1.2rem; color: #fff; margin-bottom: 4px; }
+        .cat-slug { font-size: 0.8rem; color: #666; font-family: monospace; margin-bottom: 12px; }
+	.cat-status { font-size: 0.85rem; color: #aaa; background: #000; padding: 4px 10px; border-radius: 12px; }
+        .cat-status.generating { color: var(--primary); font-weight: bold; border: 1px solid var(--primary); }
+
+        /* --- TILE MENU STYLES --- */
+        .tile-menu { position: absolute; top: 8px; right: 8px; margin: 0; z-index: 50; }
+        .tile-menu summary { 
+            padding: 0; margin: 0; border: none !important; background: transparent !important; 
+            color: #888; display: flex; align-items: center; justify-content: center; 
+            box-shadow: none !important; outline: none !important; 
+            width: 32px; height: 32px; border-radius: 50% !important;
+        }
+        .tile-menu summary:hover { color: var(--primary); background: rgba(255,255,255,0.1) !important; }
+        .tile-menu[open] summary { color: var(--primary); }
+        .tile-menu summary::after { display: none !important; } 
+
+        .tile-menu ul {
+            background: #141414 !important; border: 1px solid #444 !important;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.8) !important; border-radius: 8px !important;
+            padding: 0.5rem !important; width: 180px; position: absolute;
+            right: 0; left: auto; top: 100%; margin-top: 4px; z-index: 100; text-align: left;
+        }
+        .tile-menu ul li { margin: 0; padding: 0; list-style: none; }
+        .tile-menu ul li a { 
+            display: block; padding: 0.5rem 0.8rem; border-radius: 4px; 
+            color: #ddd !important; font-size: 0.85rem; text-decoration: none; transition: background 0.1s;
+        }
+        .tile-menu ul li a:hover { background: #2a2a2a !important; color: #fff !important; }
+
+        /* --- FEED LIST STYLES (Inside Modal) --- */
+        .feed-list { background: #0a0a0a; border-radius: 8px; padding: 10px; border: 1px solid #333; max-height: 250px; overflow-y: auto; margin-bottom: 1rem; }
+        .feed-row { display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #222; gap: 10px; }
+        .feed-row:last-child { border-bottom: none; }
+        .feed-url { font-size: 0.85rem; color: #ccc; word-break: break-all; }
+        .icon-btn { background: transparent; border: none; padding: 4px; cursor: pointer; color: #888; display: flex; align-items: center; justify-content: center; border-radius: 4px; margin: 0; }
+        .icon-btn:hover { background: #333; color: #fff; }
+        .icon-btn.danger:hover { background: #3a1111; color: #ff4444; }
+        /* --- TILE KEYWORD BADGES --- */
+        .kw-container { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin-bottom: 12px; }
+        .kw-badge {
+            display: inline-block; background: rgba(16, 149, 193, 0.15); color: var(--primary);
+            border: 1px solid rgba(16, 149, 193, 0.4); border-radius: 4px; padding: 2px 6px;
+            font-size: 0.7rem; white-space: nowrap; text-transform: lowercase;
+        }
+        /* --- NEW: Disabled Tile Styling --- */
+        .disabled-tile { 
+            opacity: 0.5; 
+            filter: grayscale(80%); 
+        }
+        .disabled-tile:hover { 
+            opacity: 0.8; 
+            filter: grayscale(40%); 
+        }
+
+
+
+
+    </style>
+
+    {% if missing_auth %}
+    <article style="background: rgba(255, 152, 0, 0.1); border-color: #ff9800; margin-bottom: 2rem;">
+        <h5 style="color: #ff9800; margin-bottom: 0.5rem;">⚠️ API Missing</h5>
+        <p style="margin: 0; font-size: 0.9rem;">You need to configure your LLM settings before collections can run.</p>
+        <a href="/settings" role="button" class="outline btn-sm" style="margin-top: 1rem; border-color: #ff9800; color: #ff9800;">Go to Settings</a>
+    </article>
+    {% endif %}
+
+    <div class="category-grid">
+        {% for col in collections %}
+
+        <div class="cat-tile {% if not col.is_active %}disabled-tile{% endif %}" onclick="document.getElementById('col-modal-{{ col.id }}').showModal()">
+            
+            <div style="position: absolute; top: 12px; left: 12px; z-index: 50;" onclick="event.stopPropagation();">
+                <label style="margin: 0; cursor: pointer;" title="Enable/Disable Collection">
+                    <input type="checkbox" role="switch" 
+                           hx-post="/collections/{{ col.id }}/toggle_active" 
+                           hx-swap="none"
+                           onclick="this.closest('.cat-tile').classList.toggle('disabled-tile')"
+                           {% if col.is_active %}checked{% endif %}
+                           style="margin: 0; width: 30px; height: 16px;">
+                </label>
+            </div>
+
+            <details class="dropdown tile-menu" name="tile-menu-group" onclick="event.stopPropagation();">
+
+
+                <summary role="button"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg></summary>
+                <ul>
+                    <li><a href="#" hx-post="/collections/{{ col.id }}/trigger" onclick="event.stopPropagation(); this.closest('details').removeAttribute('open');">Summarize Now</a></li>
+                    <li><a href="#" onclick="event.stopPropagation(); document.getElementById('edit-col-modal-{{ col.id }}').showModal(); this.closest('details').removeAttribute('open');">Edit / Add to Category</a></li>
+                    <li><a href="#" style="color: #d93526 !important;" hx-delete="/collections/{{ col.id }}" hx-confirm="Permanently delete this collection and its configuration?" onclick="event.stopPropagation();">Delete Collection</a></li>
+                </ul>
+            </details>
+
+            <span class="cat-name">{{ col.name }}</span>
+            <span class="cat-slug" style="margin-bottom: 4px;">{{ col.slug }}</span>
+            
+            {% if col.focus_keywords %}
+            <div class="kw-container">
+                {% set kws = [] %}
+                {% for k in col.focus_keywords.split(',') %}
+                    {% if k.strip() %}{% set _ = kws.append(k.strip()) %}{% endif %}
+                {% endfor %}
+                
+                {% for k in kws[:2] %}
+                    <span class="kw-badge">{{ k }}</span>
+                {% endfor %}
+                {% if kws|length > 2 %}
+                    <span class="kw-badge">+{{ kws|length - 2 }}</span>
+                {% endif %}
+            </div>
+            {% else %}
+            <div style="margin-bottom: 12px;"></div>
+            {% endif %}
+
+            <span id="status-{{ col.id }}" class="cat-status {% if col.is_generating %}generating{% endif %}">
+
+
+            <span id="status-{{ col.id }}" class="cat-status {% if col.is_generating %}generating{% endif %}">
+                {% if col.is_generating %}
+                    Generating...
+                {% elif col.last_run %}
+                    {{ col.last_run.strftime('%b %d, %H:%M') }}
+                {% else %}
+                    Pending
+                {% endif %}
+            </span>
+        </div>
+        {% endfor %}
+
+        {% if not collections %}
+        <div style="grid-column: 1 / -1; text-align: center; padding: 4rem; opacity: 0.5;">
+            <p>No collections created yet.</p>
+        </div>
+        {% endif %}
+    </div>
+
+
+    <dialog id="add-col-modal">
+        <article>
+            <header>Create New Collection</header>
+            <form hx-post="/collections/add">
+                <label>Name <input type="text" name="name" required placeholder="Daily Tech News"></label>
+                <label>System Name (Slug) <input type="text" name="slug" required placeholder="daily-tech" pattern="[a-zA-Z0-9-]+" title="Only letters, numbers, and dashes"></label>
+                <label>Assign to Category 
+                    <select name="category_id">
+                        <option value="none">-- Uncategorized --</option>
+                        {% for cat in categories %}
+                        <option value="{{ cat.id }}" {% if cat.name == 'AI Digest' %}selected{% endif %}>{{ cat.name }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <footer>
+                    <a href="#" role="button" class="secondary" onclick="document.getElementById('add-col-modal').close(); return false;">Cancel</a>
+                    <button type="submit">Create</button>
+                </footer>
+            </form>
+        </article>
+    </dialog>
+
+
+    {% for col in collections %}
+    
+    <dialog id="edit-col-modal-{{ col.id }}">
+        <article>
+            <header>Edit Details</header>
+            <form hx-post="/collections/{{ col.id }}/update">
+                <label>Name <input type="text" name="name" value="{{ col.name }}" required></label>
+                <label>Slug <input type="text" name="slug" value="{{ col.slug }}" required pattern="[a-zA-Z0-9-]+"></label>
+                <label>Category
+                    <select name="category_id">
+                        <option value="none" {% if not col.category_id %}selected{% endif %}>-- Uncategorized --</option>
+                        {% for cat in categories %}
+                        <option value="{{ cat.id }}" {% if col.category_id == cat.id %}selected{% endif %}>{{ cat.name }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <footer>
+                    <a href="#" role="button" class="secondary" onclick="document.getElementById('edit-col-modal-{{ col.id }}').close(); return false;">Cancel</a>
+                    <button type="submit">Save Changes</button>
+                </footer>
+            </form>
+        </article>
+    </dialog>
+
+    <dialog id="col-modal-{{ col.id }}" style="padding: 0; background: rgba(0,0,0,0.85); border: none;">
+        
+        <article style="width: min(90vw, 800px); max-height: 90vh; overflow-y: auto; padding: 0; margin: auto; display: block; background: #141414; border: 1px solid #333; position: relative;">
+            
+            <button onclick="document.getElementById('col-modal-{{ col.id }}').close()" 
+                    style="position: sticky; top: 1rem; float: right; margin: 1rem; z-index: 100;
+                           width: 36px; height: 36px; border-radius: 50%;
+                           background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+                           border: 1px solid #555; color: #fff;
+                           display: flex; align-items: center; justify-content: center;
+                           cursor: pointer; padding: 0;">
+                <svg class="icon" style="width: 20px; height: 20px;"><use href="#icon-close"/></svg>
+            </button>
+
+            <div style="padding: 2rem 1.5rem; clear: both;">
+                
+                <header style="margin-bottom: 2rem; padding-right: 40px;">
+                    <small style="color: #888; text-transform: uppercase; font-weight: bold; font-size: 0.75rem; display: block; margin-bottom: 0.5rem;">Configuration</small>
+                    <h3 style="margin: 0 0 0.5rem 0; font-size: 1.6rem; line-height: 1.2;">{{ col.name }}</h3>
+                </header>
+
+                <div style="margin-bottom: 3rem;">
+                    <h5 style="margin-bottom: 1rem; border-bottom: 1px solid #333; padding-bottom: 0.5rem;">1. Source Feeds</h5>
+                    <form hx-post="/collections/{{ col.id }}/add_feed" hx-target="#feed-list-{{ col.id }}" style="display: flex; gap: 10px; margin-bottom: 1rem;">
+                        <input type="url" name="url" placeholder="Paste RSS URL here..." required style="margin: 0; flex-grow: 1;">
+                        <button type="submit" style="margin: 0;">Add Feed</button>
+                    </form>
+                    <div id="feed-list-{{ col.id }}" class="feed-list">
+
+
+                        {% for feed in col.feeds %}
+                        <div class="feed-row" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #222; gap: 10px;">
+                            <div style="flex-grow: 1; min-width: 0;">
+                                <div class="feed-url" title="{{ feed.url }}" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.85rem; color: #ccc;">{{ feed.url }}</div>
+                            </div>
+                            
+                            <div style="display: flex; align-items: center; gap: 15px;">
+                                <label style="display: flex; align-items: center; gap: 5px; margin: 0; font-size: 0.75rem; color: #888; cursor: pointer;" title="Fetch full article content before summarizing">
+                                    <input type="checkbox" role="switch" 
+                                           hx-post="/feeds/{{ feed.id }}/toggle_scrape" 
+                                           {% if feed.auto_scrape %}checked{% endif %}
+                                           style="margin: 0; width: 30px; height: 16px;">
+                                    Scrape
+                                </label>
+                                
+                                <button class="icon-btn danger" hx-delete="/feeds/{{ feed.id }}" hx-confirm="Remove feed from collection?" hx-target="#feed-list-{{ col.id }}" style="margin: 0;">
+                                    <svg class="icon" style="width:16px; height:16px;"><use href="#icon-trash"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                        {% endfor %}
+
+
+
+
+
+
+
+
+
+                        {% if not col.feeds %}
+                        <div style="text-align: center; color: #666; font-size: 0.9rem; padding: 1rem;">No feeds added yet.</div>
+                        {% endif %}
+                    </div>
+                </div>
+
+
+                <div style="margin-bottom: 3rem;">
+                    <h5 style="margin-bottom: 1rem; border-bottom: 1px solid #333; padding-bottom: 0.5rem;">2. Generation Settings</h5>
+                    <form hx-post="/collections/{{ col.id }}/update_settings" hx-target="#toast-{{ col.id }}">
+                        <div class="grid">
+                            <label>Schedule Time
+                                <input type="time" name="schedule_time" value="{{ col.schedule_time }}" required>
+                            </label>
+                            <label>Article Age Filter
+                                <select name="filter_age">
+                                    <option value="all" {% if col.filter_age == 'all' %}selected{% endif %}>All available</option>
+                                    <option value="24h" {% if col.filter_age == '24h' %}selected{% endif %}>Last 24 hours</option>
+                                    <option value="new" {% if col.filter_age == 'new' %}selected{% endif %}>Only new since last run</option>
+                                </select>
+                            </label>
+                        </div>
+
+                        <div class="grid">
+                            <label>Context Length (chars per article)
+                                <input type="number" name="context_length" value="{{ col.context_length }}" required>
+                            </label>
+                            <label>Max Articles (Overall)
+                                <input type="number" name="filter_max_articles" value="{{ col.filter_max_articles }}" required>
+                            </label>
+                            <label>Max Articles Per Topic
+                                <input type="number" name="max_articles_per_topic" value="{{ col.max_articles_per_topic }}" required min="1">
+                            </label>
+                        </div>
+
+
+
+                        <label>Focus Keywords (Optional, comma separated)
+                            <input type="text" name="focus_keywords" value="{{ col.focus_keywords if col.focus_keywords else '' }}" placeholder="e.g. AI, Space, Robotics">
+                            <small style="color: #888;">Only articles containing at least one of these words will be sent to the LLM. Leave blank to process all articles.</small>
+                        </label>
+                        
+                        <div style="text-align: right; margin-top: 1rem;">
+                            <button type="submit" class="outline btn-sm">Save Settings</button>
+                        </div>
+                    </form>
+                </div>
+
+
+
+
+
+                <div style="margin-bottom: 1rem;">
+                    <h5 style="margin-bottom: 1rem; border-bottom: 1px solid #333; padding-bottom: 0.5rem;">3. AI System Prompt</h5>
+                    <form hx-post="/collections/{{ col.id }}/update_prompt" hx-target="#toast-{{ col.id }}">
+                        <label>
+                            <textarea name="system_prompt" rows="8" required style="font-family: monospace; font-size: 0.85rem;">{{ col.system_prompt if col.system_prompt else default_prompt }}</textarea>
+                        </label>
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span id="toast-{{ col.id }}" style="color: var(--primary); font-weight: bold; font-size: 0.9rem;"></span>
+                            <button type="submit">Save Prompt</button>
+                        </div>
+                    </form>
+                </div>
+
+            </div>
+        </article>
+    </dialog>
+    {% endfor %}
+
+    <script>
+        function checkStatus() {
+            fetch('/status.json')
+                .then(r => r.json())
+                .then(data => {
+                    for (const [cid, info] of Object.entries(data)) {
+                        const el = document.getElementById('status-' + cid);
+                        if (el) {
+                            el.innerText = info.text;
+                            if (info.status === 'generating') {
+                                el.classList.add('generating');
+                            } else {
+                                el.classList.remove('generating');
+                            }
+                        }
+                    }
+                });
+        }
+        setInterval(checkStatus, 5000);
+    </script>
+
+{% endblock %}

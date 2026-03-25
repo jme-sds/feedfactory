@@ -1,0 +1,149 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div style="max-width: 800px; margin: 0 auto; padding-bottom: 4rem;">
+    <h2 style="margin-bottom: 2rem;">Global Settings</h2>
+
+    <form id="global-settings-form" hx-post="/settings/update" hx-target="#settings-msg" novalidate>
+        
+        <details name="settings-accordion" open>
+            <summary><strong>1. AI Provider (OpenAI Compatible)</strong></summary>
+            <div style="padding-top: 1rem;">
+                <p style="font-size: 0.9rem; color: #888; margin-bottom: 1.5rem;">Configure your LLM connection. Supports any OpenAI-compatible endpoint. Leave blank to use environment variables.</p>
+                <label>Base URL
+                    <input type="url" name="api_endpoint" value="{{ settings.api_endpoint if settings.api_endpoint else '' }}" placeholder="http://localhost:4000/v1/chat/completions">
+                </label>
+                <div class="grid">
+                    <label>API Key
+                        <input type="password" name="api_key" value="{{ settings.api_key if settings.api_key else '' }}" placeholder="sk-...">
+                    </label>
+                    <label>Model Name
+                        <input type="text" name="model_name" value="{{ settings.model_name }}" required placeholder="gpt-4o-mini">
+                    </label>
+                </div>
+
+                <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px; margin-bottom: 20px;">
+                    <button type="button" class="secondary outline btn-sm" style="margin: 0; width: auto;"
+                            hx-post="/settings/test_llm" 
+                            hx-include="#global-settings-form" 
+                            hx-target="#test-llm-result"
+                            hx-indicator="#test-spinner">
+                        Test Connection
+                    </button>
+                    <span id="test-spinner" class="htmx-indicator" aria-busy="true" style="margin: 0;"></span>
+                    <div id="test-llm-result" style="font-size: 0.9rem;"></div>
+                </div>
+            </div>
+        </details>
+
+        <details name="settings-accordion">
+            <summary><strong>2. Reader Auto-Cleanup</strong></summary>
+            <div style="padding-top: 1rem;">
+                <p style="font-size: 0.9rem; color: #888; margin-bottom: 1.5rem;">Automatically delete old articles from the local database to save space.</p>
+                <div class="grid">
+                    <label>Keep Read Articles (Days)
+                        <input type="number" name="retention_read_days" value="{{ settings.retention_read_days }}" min="1">
+                    </label>
+                    <label>Keep Unread Articles (Days)
+                        <input type="number" name="retention_unread_days" value="{{ settings.retention_unread_days }}" min="1">
+                    </label>
+                </div>
+            </div>
+        </details>
+
+        <details name="settings-accordion">
+            <summary><strong>3. Collection Defaults</strong></summary>
+            <div style="padding-top: 1rem;">
+                <p style="font-size: 0.9rem; color: #888; margin-bottom: 1.5rem;">Default settings applied when you create a new AI Collection.</p>
+                <div class="grid">
+                    <label>Default Schedule Time 
+                        <input type="time" name="default_schedule" value="{{ settings.default_schedule }}">
+                    </label>
+                    <label>Default Context Length 
+                        <input type="number" name="default_context_length" value="{{ settings.default_context_length }}" min="0">
+                    </label>
+                    <label>Default Max Articles (0=Unlimited) 
+                        <input type="number" name="default_filter_max" value="{{ settings.default_filter_max }}" min="0">
+                    </label>
+                    <label>Default Max Age
+                        <select name="default_filter_age">
+                            <option value="all" {% if settings.default_filter_age == 'all' %}selected{% endif %}>All available</option>
+                            <option value="24h" {% if settings.default_filter_age == '24h' %}selected{% endif %}>Last 24 hours</option>
+                            <option value="new" {% if settings.default_filter_age == 'new' %}selected{% endif %}>Only new since last run</option>
+                        </select>
+                    </label>
+                </div>
+                <label>Default Focus Keywords (Optional, comma separated)
+                    <input type="text" name="default_focus_keywords" value="{{ settings.default_focus_keywords if settings.default_focus_keywords else '' }}" placeholder="e.g. AI, Space, Politics">
+                </label>
+                <label>Default System Prompt
+                    <textarea name="default_system_prompt" rows="3" required>{{ settings.default_system_prompt }}</textarea>
+                </label>
+            </div>
+        </details>
+
+        <details name="settings-accordion">
+            <summary><strong>4. Reader Typography</strong></summary>
+            <div style="padding-top: 1rem;">
+                <p style="font-size: 0.9rem; color: #888; margin-bottom: 1.5rem;">Customize the reading experience.</p>
+                <div class="grid">
+                    <label>Font Family
+                        <input type="text" name="reader_font_family" value="{{ settings.reader_font_family }}" required>
+                    </label>
+                    <label>Font Size
+                        <input type="text" name="reader_font_size" value="{{ settings.reader_font_size }}" required>
+                    </label>
+                    <label>Line Height
+                        <input type="text" name="reader_line_height" value="{{ settings.reader_line_height }}" required>
+                    </label>
+                </div>
+            </div>
+        </details>
+
+        <details name="settings-accordion">
+            <summary><strong>5. Storage & Offline (PWA)</strong></summary>
+            <div style="padding-top: 1rem;">
+                <p style="font-size: 0.9rem; color: #888; margin-bottom: 1.5rem;">Configure how many articles are cached for offline reading when the app is installed to your home screen.</p>
+                <label>Offline Article Limit
+                    <input type="number" name="pwa_offline_limit" value="{{ settings.pwa_offline_limit }}" min="10" max="1000">
+                </label>
+            </div>
+        </details>
+
+        <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #333; display: flex; align-items: center; gap: 15px;">
+            <button type="submit" style="margin: 0; width: auto;">Save Settings</button>
+            <span id="settings-spinner" class="htmx-indicator" aria-busy="true" style="margin: 0;"></span>
+            <div id="settings-msg" style="margin: 0;"></div>
+        </div>
+        
+    </form> <br><br>
+
+    <details name="settings-accordion">
+        <summary><strong>6. Data Backup & Restore</strong></summary>
+        <div style="padding-top: 1rem;">
+            <p style="font-size: 0.9rem; color: #888; margin-bottom: 1.5rem;">Download a complete backup of your database, or restore from a previous backup.</p>
+            
+            <div style="display: flex; gap: 15px; align-items: center; margin-bottom: 1.5rem;">
+                <a href="/settings/backup" role="button" class="outline" download>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 8px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    Download Database Backup
+                </a>
+            </div>
+
+            <hr style="border-color: #333; margin: 1.5rem 0;">
+            
+            <form hx-post="/settings/restore" hx-encoding="multipart/form-data" hx-target="#restore-msg" style="margin: 0;">
+                <label>Restore from Backup (.db file)
+                    <div style="display: flex; gap: 10px;">
+                        <input type="file" name="file" accept=".db" required style="margin: 0;">
+                        <button type="submit" class="danger outline" style="margin: 0; width: auto; border-color: #d93526; color: #d93526;" onclick="return confirm('Are you sure? This will permanently overwrite your current database!');">Restore</button>
+                    </div>
+                </label>
+                <div id="restore-msg" style="margin-top: 10px; font-size: 0.9rem;"></div>
+            </form>
+        </div>
+    </details>
+
+</div>
+{% endblock %}
+

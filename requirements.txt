@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+requests
+beautifulsoup4
+feedparser
+python-multipart
+apscheduler
+gradio_client
+Jinja2
+sentence-transformers
+scikit-learn
+

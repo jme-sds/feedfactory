@@ -1,0 +1,417 @@
+{% extends "layout.html" %}
+
+{% block title %}Reader{% endblock %}
+
+{% block actions %}
+    <li style="padding: 0;">
+        <details class="dropdown nav-menu" style="margin: 0;" name="nav-menu-group">
+            <summary role="button">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg>
+            </summary>
+            <ul dir="rtl">
+                <li><a href="#" onclick="document.getElementById('sub-modal').showModal(); this.closest('details').removeAttribute('open');">Add Feed</a></li>
+                <li><a href="#" onclick="document.getElementById('import-modal').showModal(); this.closest('details').removeAttribute('open');">Import OPML</a></li>
+                <li><a href="/subscriptions/export.opml" download>Export OPML</a></li>
+            </ul>
+        </details>
+    </li>
+{% endblock %}
+
+{% block content %}
+    
+    <style>
+        .htmx-indicator { display: none; }
+        .htmx-request .htmx-indicator { display: inline-block; }
+        .htmx-request.htmx-indicator { display: inline-block; }
+        
+        #reader-body article, #reader-body main {
+            max-height: none !important; overflow: visible !important; padding: 0 !important; margin: 0 !important; border: none !important; background: transparent !important; box-shadow: none !important;
+        }
+
+        .icon-read { color: #fff; }
+        .is-read-badge { border-color: #4CAF50 !important; background: rgba(76, 175, 80, 0.2) !important; color: #4CAF50 !important; }
+        .is-read-badge .icon-read { color: #4CAF50; }
+
+        /* Dynamic Typography Overrides */
+        #reader-body, #reader-body p, #reader-body li, #reader-body blockquote {
+            font-family: {{ settings.reader_font_family|safe }} !important;
+            font-size: {{ settings.reader_font_size }} !important;
+            line-height: {{ settings.reader_line_height }} !important;
+        }
+        #reader-body h1, #reader-body h2, #reader-body h3, #reader-body h4 {
+            font-family: {{ settings.reader_font_family|safe }} !important;
+            line-height: 1.3 !important;
+        }
+
+        /* Nav Menu Overrides */
+        .nav-menu { position: relative; }
+        .nav-menu summary { 
+            padding: 4px; margin: 0; border: none !important; background: transparent !important; 
+            color: #fff; display: flex; align-items: center; justify-content: center; 
+            box-shadow: none !important; outline: none !important; 
+            width: 36px; height: 36px; border-radius: 50% !important;
+        }
+        .nav-menu summary:hover { background: rgba(255,255,255,0.1) !important; color: var(--primary); }
+        .nav-menu[open] summary { color: var(--primary); }
+        .nav-menu summary::after { display: none !important; }
+
+        .nav-menu ul {
+            background: #141414 !important; border: 1px solid #444 !important;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.8) !important; border-radius: 8px !important;
+            padding: 0.5rem !important; width: 160px; position: absolute; right: 0; left: auto; 
+            top: 100%; margin-top: 8px; z-index: 1000; text-align: left; display: block !important; 
+        }
+        .nav-menu ul li { display: block !important; margin: 0; padding: 0; }
+        .nav-menu ul li a { 
+            display: block; padding: 0.5rem 0.8rem; border-radius: 4px; color: #ddd !important; 
+            font-size: 0.9rem; text-decoration: none; transition: background 0.1s; border: none !important;
+        }
+        .nav-menu ul li a:hover { background: #2a2a2a !important; color: #fff !important; }
+    </style>
+
+    <div id="reader-container" hx-get="/reader/categories" hx-trigger="load">
+        <div style="text-align: center; padding: 4rem; opacity: 0.5;">
+            <span aria-busy="true"></span> Loading...
+        </div>
+    </div>
+
+    <dialog id="sub-modal">
+        <article>
+            <header>Subscribe to Feed</header>
+            <form hx-post="/subscriptions/add">
+                <label>Feed URL <input type="url" name="url" required placeholder="https://daringfireball.net/feed"></label>
+                <label>Category 
+                    <select name="category_id">
+                        <option value="">-- None --</option>
+                        {% for cat in categories %}
+                        <option value="{{ cat.id }}">{{ cat.name }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <footer>
+                    <a href="#" role="button" class="secondary" onclick="document.getElementById('sub-modal').close(); return false;">Cancel</a>
+                    <button type="submit" onclick="document.getElementById('sub-modal').close();">Subscribe</button>
+                </footer>
+            </form>
+            <hr>
+            <form hx-post="/categories/add" style="display: flex; gap: 10px; margin: 0;">
+                <input type="text" name="name" placeholder="New Category Name" required style="margin: 0; flex-grow: 1; font-size: 0.8rem;">
+                <button type="submit" class="secondary btn-sm" style="margin: 0;">Add</button>
+            </form>
+        </article>
+    </dialog>
+
+    <dialog id="import-modal">
+        <article>
+            <header>Import Subscriptions (OPML)</header>
+            <form hx-post="/subscriptions/import_opml" hx-encoding="multipart/form-data" hx-target="#reader-container" onsubmit="document.getElementById('import-modal').close()">
+                <label>OPML File <input type="file" name="file" accept=".opml,.xml" required></label>
+                <small style="display: block; margin-bottom: 1.5rem; color: #888;">Categories found in the file will be automatically created and assigned.</small>
+                <footer>
+                    <a href="#" role="button" class="secondary" onclick="document.getElementById('import-modal').close(); return false;">Cancel</a>
+                    <button type="submit">Import File</button>
+                </footer>
+            </form>
+        </article>
+    </dialog>
+
+    <dialog id="add-to-collection-modal">
+        <article>
+            <header>Add Feed to Collection</header>
+            <form hx-post="/collections/add_feed_by_url" hx-target="#add-to-col-response">
+                <input type="hidden" name="url" id="add-to-col-url">
+                <label>Select Target Collection
+                    <select name="collection_id" required>
+                        {% for col in collections %}
+                        <option value="{{ col.id }}">{{ col.name }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <div id="add-to-col-response" style="margin-bottom: 1rem; font-size: 0.9rem;"></div>
+                <footer>
+                    <a href="#" role="button" class="secondary" onclick="document.getElementById('add-to-collection-modal').close(); return false;">Done</a>
+                    <button type="submit">Add Feed</button>
+                </footer>
+            </form>
+        </article>
+    </dialog>
+
+    <dialog id="article-modal" style="padding: 0; margin: 0; max-width: 100vw; max-height: 100vh; width: 100vw; height: 100vh; background: #141414; border: none; border-radius: 0;">
+        
+        <article id="modal-scroll-container" style="width: 100%; height: 100%; overflow-y: auto; padding: 0; margin: 0; display: block; background: transparent; border: none; position: relative;">
+            
+            <div style="position: sticky; top: 0; z-index: 100; padding: 1rem; display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none;">
+                
+                <div style="display: flex; gap: 10px; pointer-events: auto;">
+                    <button id="mark-read-badge" onclick="manualMarkRead()" title="Mark as Read"
+                            style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); border: 1px solid #555; cursor: pointer; transition: all 0.3s; margin: 0;">
+                        <svg class="icon icon-read" style="width: 20px; height: 20px; stroke-width: 3;"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    </button>
+                   
+                    <button id="fetch-content-btn" onclick="toggleFetchContent()" title="Toggle Reader View"
+                            style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); border: 1px solid #555; cursor: pointer; transition: all 0.3s; margin: 0; color: #fff;">
+                        <svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+                    </button>
+                    
+                    <button id="summarize-article-btn" onclick="generateArticleSummary()" title="AI Summary"
+                            style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); border: 1px solid #555; cursor: pointer; transition: all 0.3s; margin: 0; color: #fff;">
+                        <svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1-1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+                    </button>
+
+                    <span id="fetch-spinner" style="display: none; align-items: center; justify-content: center; width: 36px; height: 36px; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); border-radius: 50%; border: 1px solid #555; margin: 0;">
+                        <span aria-busy="true"></span>
+                    </span>
+
+
+                </div>
+
+                <button onclick="closeReader()" title="Close Article"
+                        style="pointer-events: auto; width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); border: 1px solid #555; color: #fff; cursor: pointer; margin: 0;">
+                    <svg class="icon" style="width: 20px; height: 20px;"><use href="#icon-close"/></svg>
+                </button>
+                
+            </div>
+
+            <div style="max-width: 800px; margin: 0 auto; padding: 0 1.5rem 4rem 1.5rem;">
+                <header style="margin-bottom: 2rem;">
+                    <small id="reader-source" style="color: #888; text-transform: uppercase; font-weight: bold; font-size: 0.75rem; display: block; margin-bottom: 0.5rem;"></small>
+                    <h3 id="reader-title" style="margin: 0 0 0.5rem 0; font-size: 1.6rem; line-height: 1.2;"></h3>
+                    <a id="reader-link" href="#" target="_blank" style="font-size: 0.9rem; color: var(--primary); text-decoration: none;">Visit Original Website &rarr;</a>
+                </header>
+
+                <div id="reader-body" style="line-height: 1.7; font-size: 1.15rem;"></div>
+                
+                <div style="margin-top: 4rem; text-align: center; opacity: 0.5;">
+                    <button class="outline" onclick="closeReader()" style="border: none;">Close Article</button>
+                </div>
+            </div>
+     
+                <dialog id="single-summary-modal" style="padding: 0; background: transparent; border: none; box-shadow: none;">
+                    
+                    <article style="width: min(90vw, 700px); max-height: 80vh; margin: auto; background: #1a1a1a; border: 1px solid #444; border-radius: 12px; padding: 0; box-shadow: 0 10px 40px rgba(0,0,0,0.9); display: flex; flex-direction: column; overflow: hidden;">
+                        
+                        <div style="background: rgba(26,26,26,0.95); padding: 1rem 1.5rem; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; z-index: 10; flex-shrink: 0;">
+                            <h4 style="margin: 0; font-size: 1.2rem; display: flex; align-items: center; gap: 8px; color: #fff;">
+                                <svg style="color: var(--primary);" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1-1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+                                AI Summary
+                            </h4>
+                            <button onclick="document.getElementById('single-summary-modal').close()" style="width: 32px; height: 32px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid #555; color: #fff; cursor: pointer; margin: 0; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.background='transparent'">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                            </button>
+                        </div>
+                        
+                        <div id="summary-content" style="padding: 2rem; font-size: 1.05rem; line-height: 1.7; color: #ddd; overflow-y: auto; flex-grow: 1;">
+                            </div>
+                        
+                    </article>
+
+                </dialog>
+            </div>
+        </article>
+    </dialog>
+
+
+
+
+        </article>
+    </dialog>
+
+    <script>
+        const modal = document.getElementById('article-modal');
+        const scrollContainer = document.getElementById('modal-scroll-container');
+        
+        let currentArticleLink = "";
+        let currentArticleUiId = "";
+        let isArticleRead = false;
+        
+        // --- NEW: Toggle Fetch State ---
+        let isArticleFetched = false;
+        let originalArticleHTML = "";
+        let fetchedArticleHTML = "";
+
+        function openAddToCollectionModal(url) {
+            document.getElementById('add-to-col-url').value = url;
+            document.getElementById('add-to-col-response').innerHTML = '';
+            document.getElementById('add-to-collection-modal').showModal();
+        }
+
+        function openReader(ui_id, title, source, link, is_read) {
+            const template = document.getElementById('content-' + ui_id);
+            if (!template) return;
+
+            currentArticleLink = link;
+            currentArticleUiId = ui_id;
+            isArticleRead = is_read === 'True';
+            
+            // Reset the fetch state for the new article
+            isArticleFetched = false;
+            fetchedArticleHTML = "";
+            originalArticleHTML = template.innerHTML;
+
+            document.getElementById('reader-title').innerText = title;
+            document.getElementById('reader-source').innerText = source;
+            document.getElementById('reader-link').href = link;
+            
+            document.getElementById('reader-body').innerHTML = originalArticleHTML;
+            
+            updateReadBadgeUI();
+            updateFetchBadgeUI();
+
+            modal.showModal(); 
+            document.body.style.overflow = 'hidden'; 
+
+            if(scrollContainer) scrollContainer.scrollTop = 0;
+        }
+
+        function closeReader() {
+            modal.close(); 
+            document.body.style.overflow = ''; 
+        }
+
+        modal.addEventListener('close', () => { document.body.style.overflow = ''; });
+        
+        // Prevent clicking the scroll background from closing it now that it's full screen, 
+        // to prevent accidental closures while scrolling down.
+        // modal.addEventListener('click', (event) => { if (event.target === modal) closeReader(); });
+
+        function updateReadBadgeUI() {
+            const badge = document.getElementById('mark-read-badge');
+            if (isArticleRead) {
+                badge.classList.add('is-read-badge');
+            } else {
+                badge.classList.remove('is-read-badge');
+            }
+        }
+        
+        function updateFetchBadgeUI() {
+            const badge = document.getElementById('fetch-content-btn');
+            if (isArticleFetched) {
+                badge.style.color = 'var(--primary)';
+                badge.style.borderColor = 'var(--primary)';
+            } else {
+                badge.style.color = '#fff';
+                badge.style.borderColor = '#555';
+            }
+        }
+
+        async function toggleFetchContent() {
+            const bodyDiv = document.getElementById('reader-body');
+            const btn = document.getElementById('fetch-content-btn');
+            const spinner = document.getElementById('fetch-spinner');
+
+            if (!isArticleFetched) {
+                if (fetchedArticleHTML) {
+                    // Instantly restore cached fetch
+                    bodyDiv.innerHTML = fetchedArticleHTML;
+                    isArticleFetched = true;
+                    updateFetchBadgeUI();
+                } else {
+                    // Scrape from backend
+                    btn.style.display = 'none';
+                    spinner.style.display = 'flex';
+                    
+                    const formData = new FormData();
+                    formData.append('url', currentArticleLink);
+                    
+                    try {
+                        const response = await fetch('/reader/fetch_content', { method: 'POST', body: formData });
+                        const html = await response.text();
+                        fetchedArticleHTML = html;
+                        bodyDiv.innerHTML = fetchedArticleHTML;
+                        isArticleFetched = true;
+                    } catch (e) {
+                        console.error('Fetch failed:', e);
+                        alert("Failed to scrape article.");
+                    }
+                    
+                    btn.style.display = 'flex';
+                    spinner.style.display = 'none';
+                    updateFetchBadgeUI();
+                }
+            } else {
+                // Revert to original RSS snippet
+                bodyDiv.innerHTML = originalArticleHTML;
+                isArticleFetched = false;
+                updateFetchBadgeUI();
+            }
+        }
+
+        function triggerMarkAsRead() {
+            if (isArticleRead || !currentArticleLink) return;
+            
+            const formData = new FormData();
+            formData.append('url', currentArticleLink);
+            fetch('/reader/mark_read', { method: 'POST', body: formData });
+            
+            isArticleRead = true;
+            updateReadBadgeUI();
+            
+            const card = document.getElementById('card-' + currentArticleUiId);
+            if (card) {
+                card.style.opacity = '0.4';
+                card.classList.add('article-read');
+            }
+        }
+
+        function manualMarkRead() {
+            triggerMarkAsRead();
+        }
+
+        scrollContainer.addEventListener('scroll', function() {
+            if (isArticleRead) return; 
+            const maxScroll = this.scrollHeight - this.clientHeight;
+            if (maxScroll <= 0) {
+                triggerMarkAsRead();
+                return;
+            }
+            if ((this.scrollTop / maxScroll) > 0.5) {
+                triggerMarkAsRead();
+            }
+        });
+
+        // PWA Pre-fetch: Silently load the "All Feeds" stream into the Service Worker 
+        // cache 2 seconds after the page loads, so they are ready if you go offline.
+        setTimeout(() => {
+            fetch('/reader/stream?category_id=all').catch(() => {});
+        }, 2000);
+
+        async function generateArticleSummary() {
+            const btn = document.getElementById('summarize-article-btn');
+            const spinner = document.getElementById('fetch-spinner');
+            const summaryModal = document.getElementById('single-summary-modal');
+            const summaryContent = document.getElementById('summary-content');
+
+            // Swap out the button for the spinner
+            btn.style.display = 'none';
+            spinner.style.display = 'flex';
+
+            // Extract the raw text currently visible on the user's screen
+            const articleText = document.getElementById('reader-body').innerText;
+            const formData = new FormData();
+            formData.append('text', articleText);
+
+            try {
+                const response = await fetch('/reader/summarize_article', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error("Failed to reach server.");
+                
+                const html = await response.text();
+                summaryContent.innerHTML = html;
+                
+                // Pop open the summary window
+                summaryModal.showModal();
+            } catch (e) {
+                console.error(e);
+                alert("Could not generate summary. Check Docker logs.");
+            } finally {
+                // Restore the UI
+                btn.style.display = 'flex';
+                spinner.style.display = 'none';
+            }
+        }
+
+    </script>
+{% endblock %}
