@@ -54,7 +54,37 @@
     details.filter-menu summary { list-style: none; margin: 0 !important; padding: 0 !important; }
     details.filter-menu[open] summary { margin-bottom: 0 !important; }
     details.filter-menu summary::after, details.filter-menu summary::-webkit-details-marker { display: none !important; }
+    .article-card.article-selected {
+        outline: 2px solid rgba(16, 149, 193, 0.9);
+        background: rgba(16, 149, 193, 0.12) !important;
+    }
+    .select-checkbox {
+        width: 16px;
+        height: 16px;
+        cursor: pointer;
+        accent-color: var(--primary);
+    }
 </style>
+
+<div id="multi-actions-bar"
+     style="display:none; position: sticky; top: 10px; z-index: 1000; margin: 0 0 1rem 0; padding: 0.75rem; background: rgba(20, 20, 20, 0.95); border: 1px solid #444; border-radius: 12px;">
+    <div style="display:flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;">
+        <div style="display:flex; align-items:center; gap: 0.75rem; flex-wrap: wrap;">
+            <div style="color:#fff;">
+                <strong><span id="selected-count">0</span></strong>
+                <span style="color:#bbb;">selected</span>
+            </div>
+            <label style="display:flex; align-items:center; gap:0.5rem; color:#bbb; font-size:0.9rem; user-select:none;">
+                <input id="scrape-before-summary" type="checkbox" onchange="updateBatchScrapeUI()" />
+                Scrape before summary
+            </label>
+        </div>
+        <div style="display:flex; gap: 0.5rem; align-items:center; flex-wrap: wrap;">
+            <button id="mark-selected-read-btn" class="secondary outline" style="padding: 6px 12px; font-size: 0.85rem; margin: 0;" onclick="markSelectedAsRead()">Mark as read</button>
+            <button id="summarize-selected-btn" style="padding: 6px 12px; font-size: 0.85rem; margin: 0;" onclick="summarizeSelectedArticles()">Summarize selected</button>
+        </div>
+    </div>
+</div>
 
 <div id="articles-list" style="padding-bottom: 2rem;">
     {% for article in articles %}
@@ -70,6 +100,17 @@
              onmouseout="this.style.background='transparent'"
              onclick="openReader(this.dataset.uiId, this.dataset.title, this.dataset.source, this.dataset.link, this.dataset.isRead)">
         
+        <div style="display:flex; justify-content: flex-end; margin-bottom: 0.35rem;">
+            <label style="display:flex; align-items:center; gap:0.5rem; color:#888; user-select:none;">
+                <input type="checkbox"
+                       class="select-checkbox"
+                       data-link="{{ article.link }}"
+                       data-ui-id="{{ article.ui_id }}"
+                       onchange="toggleSelectedArticle(this)"
+                       onclick="event.stopPropagation()" />
+            </label>
+        </div>
+
         <div class="meta" style="display: flex; justify-content: space-between; font-size: 0.75rem; color: #666; margin-bottom: 0.3rem;">
             <span style="font-weight: 500; letter-spacing: 0.03em;">{{ article.source_title }}</span>
             <span>{{ article.published_str }}</span>
@@ -91,8 +132,135 @@
 </div>
 
 <script>
-    document.addEventListener("DOMContentLoaded", () => { applyFilters(); });
-    applyFilters();
+    const selectedArticles = new Set(); // stores article links
+    let batchScrapeEnabled = true;
+
+    function updateBatchScrapeUI() {
+        const cb = document.getElementById('scrape-before-summary');
+        batchScrapeEnabled = !!(cb && cb.checked);
+    }
+
+    function toggleSelectedArticle(checkboxEl) {
+        const link = checkboxEl?.dataset?.link;
+        if (!link) return;
+
+        const card = checkboxEl.closest('.article-card');
+        if (checkboxEl.checked) {
+            selectedArticles.add(link);
+            if (card) card.classList.add('article-selected');
+        } else {
+            selectedArticles.delete(link);
+            if (card) card.classList.remove('article-selected');
+        }
+
+        const count = selectedArticles.size;
+        const bar = document.getElementById('multi-actions-bar');
+        const selectedCount = document.getElementById('selected-count');
+        if (bar) bar.style.display = count > 0 ? 'block' : 'none';
+        if (selectedCount) selectedCount.innerText = String(count);
+    }
+
+    function getSelectedLinks() {
+        return Array.from(selectedArticles);
+    }
+
+    function applySelectionStylingFromCheckboxState() {
+        document.querySelectorAll('.article-card').forEach(card => card.classList.remove('article-selected'));
+        document.querySelectorAll('.select-checkbox').forEach(cb => {
+            if (cb.checked) {
+                const card = cb.closest('.article-card');
+                if (card) card.classList.add('article-selected');
+            }
+        });
+    }
+
+    function resetSelectionUI() {
+        selectedArticles.clear();
+        document.querySelectorAll('.select-checkbox').forEach(cb => { cb.checked = false; });
+        applySelectionStylingFromCheckboxState();
+        const bar = document.getElementById('multi-actions-bar');
+        if (bar) bar.style.display = 'none';
+        const selectedCount = document.getElementById('selected-count');
+        if (selectedCount) selectedCount.innerText = '0';
+    }
+
+    async function markSelectedAsRead() {
+        const links = getSelectedLinks();
+        if (!links.length) {
+            alert('Select at least one article.');
+            return;
+        }
+
+        const btn = document.getElementById('mark-selected-read-btn');
+        const original = btn ? btn.innerText : '';
+        if (btn) { btn.disabled = true; btn.innerText = 'Marking...'; }
+
+        try {
+            const formData = new FormData();
+            formData.append('urls', links.join(','));
+            const response = await fetch('/reader/mark_read_bulk', { method: 'POST', body: formData });
+            if (!response.ok) throw new Error('Failed to mark as read.');
+
+            // Update UI immediately
+            const cards = document.querySelectorAll('.article-card');
+            links.forEach(link => {
+                for (const card of cards) {
+                    if (card.dataset.link === link) {
+                        card.classList.add('article-read');
+                        card.style.opacity = '0.4';
+                        break;
+                    }
+                }
+            });
+
+            resetSelectionUI();
+        } catch (e) {
+            console.error(e);
+            alert('Could not mark selected articles as read.');
+        } finally {
+            if (btn) { btn.disabled = false; btn.innerText = original; }
+        }
+    }
+
+    async function summarizeSelectedArticles() {
+        const links = getSelectedLinks();
+        if (!links.length) {
+            alert('Select at least one article.');
+            return;
+        }
+
+        const scrape = !!batchScrapeEnabled;
+
+        const btn = document.getElementById('summarize-selected-btn');
+        const original = btn ? btn.innerText : '';
+        if (btn) { btn.disabled = true; btn.innerText = 'Summarizing...'; }
+
+        try {
+            const formData = new FormData();
+            formData.append('urls', links.join(','));
+            formData.append('scrape', scrape ? '1' : '0');
+
+            const response = await fetch('/reader/summarize_articles', { method: 'POST', body: formData });
+            if (!response.ok) throw new Error('Failed to generate summary.');
+            const html = await response.text();
+
+            const summaryContent = document.getElementById('summary-content');
+            const summaryModal = document.getElementById('single-summary-modal');
+            if (!summaryContent || !summaryModal) throw new Error('Summary modal not found.');
+            summaryContent.innerHTML = html;
+            summaryModal.showModal();
+        } catch (e) {
+            console.error(e);
+            alert('Could not generate summary for selected articles. Check Docker logs.');
+        } finally {
+            if (btn) { btn.disabled = false; btn.innerText = original; }
+        }
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+        updateBatchScrapeUI();
+        applyFilters();
+    });
 
     function applyFilters() {
         const status = document.getElementById('filter-status').value;

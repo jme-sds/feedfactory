@@ -14,7 +14,7 @@ services:
       - ./data:/app/data  # Persist the SQLite DB and XML files
 
   parser:
-    image: wangqiru/mercury-parser-api:latest
+    image: tbelbek/postlight-readability-parser:latest
     expose:
       - "3000"
     restart: unless-stopped

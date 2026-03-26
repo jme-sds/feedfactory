@@ -729,7 +729,7 @@ def get_feed_tiles(request: Request, category_id: str):
             "category_id": category_id, "category_name": cat_name, "total_unread": total_unread
         })
 import re
-from urllib.parse import urljoin, unquote
+from urllib.parse import urljoin, unquote, quote
 
 def extract_real_url(raw_url: str, base_url: str) -> str:
     """Uses Regex to aggressively extract true URLs from corrupted strings."""
@@ -757,74 +757,100 @@ def extract_real_url(raw_url: str, base_url: str) -> str:
     return cleaned
 
 
+def scrape_article_html(url: str) -> str:
+    """
+    Fetch and parse an article via the Postlight parser sidecar, then sanitize HTML for safe rendering.
+    Returns sanitized HTML.
+    """
+    parser_api_url = f"http://parser:3000/parser?url={quote(url, safe='')}"
+    response = requests.get(parser_api_url, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+
+    if "error" in data and data["error"]:
+        raise RuntimeError(data.get("message", "Unknown Postlight parser error"))
+
+    raw_html = data.get("content", "")
+    if not raw_html:
+        raise RuntimeError("Postlight Parser could not extract content from this page.")
+
+    # Extract Lead Image Safely
+    header_image_html = ""
+    lead_image = extract_real_url(data.get("lead_image_url"), url)
+    if lead_image:
+        header_image_html = (
+            f'<img src="{lead_image}" referrerpolicy="no-referrer" '
+            f'style="max-width: 100%; height: auto; border-radius: 8px; '
+            f'margin-bottom: 1.5rem; display: block; box-shadow: 0 4px 12px rgba(0,0,0,0.3);" '
+            f'onerror="this.style.display=\'none\'" alt="Header Image"/>\n'
+        )
+
+    soup = BeautifulSoup(raw_html, 'html.parser')
+
+    # Fix: remove scripts/styles/iframes so HTMX doesn't execute broken/malicious content
+    for tag in soup.find_all(['script', 'style', 'iframe', 'noscript']):
+        tag.decompose()
+
+    # Fix: remove <picture> wrappers so images render predictably
+    for picture in soup.find_all('picture'):
+        img = picture.find('img')
+        if img:
+            picture.replace_with(img)
+        else:
+            picture.decompose()
+
+    # Remove standalone <source> tags just in case
+    for source in soup.find_all('source'):
+        source.decompose()
+
+    for a in soup.find_all('a'):
+        href = extract_real_url(a.get('href'), url)
+        if href:
+            a['href'] = href
+        a['target'] = '_blank'
+        a['style'] = 'color: #1095c1; text-decoration: none;'
+
+    for img in soup.find_all('img'):
+        src = extract_real_url(img.get('src'), url)
+        if src:
+            img['src'] = src
+            img['referrerpolicy'] = 'no-referrer'
+            img['loading'] = 'lazy'
+            img['style'] = (
+                'max-width: 100%; height: auto; border-radius: 8px; '
+                'margin: 1.5rem auto; display: block; box-shadow: 0 4px 12px rgba(0,0,0,0.3);'
+            )
+            img['onerror'] = "this.style.display='none'"
+        else:
+            img.decompose()
+
+        # Strip competing layout & responsive attributes
+        for attr in ['class', 'width', 'height', 'srcset', 'sizes']:
+            if attr in img.attrs:
+                del img[attr]
+
+    return header_image_html + str(soup)
+
+
+def html_to_plain_text(html: str) -> str:
+    soup = BeautifulSoup(html or "", 'html.parser')
+    for tag in soup.find_all(['script', 'style', 'iframe', 'noscript']):
+        tag.decompose()
+    return soup.get_text(" ", strip=True)
+
+
+def truncate_text(text: str, limit: int) -> str:
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "... [Text Truncated]"
+
+
 @app.post("/reader/fetch_content")
 def fetch_content(url: str = Form(...)):
     try:
-        # 1. Ask the local Postlight Parser sidecar to fetch and parse
-        parser_api_url = f"http://parser:3000/parser?url={url}"
-        response = requests.get(parser_api_url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        if "error" in data and data["error"]:
-            return f"<p style='color: #ff4444;'>Parser Error: {data.get('message', 'Unknown error')}</p>"
-
-        raw_html = data.get("content", "")
-        if not raw_html:
-            return "<p style='color: #888; text-align: center; padding: 2rem;'>Postlight Parser could not extract content from this page.</p>"
-
-        # 2. Extract Lead Image Safely
-        header_image_html = ""
-        lead_image = extract_real_url(data.get("lead_image_url"), url)
-        if lead_image:
-            header_image_html = f'<img src="{lead_image}" referrerpolicy="no-referrer" style="max-width: 100%; height: auto; border-radius: 8px; margin-bottom: 1.5rem; display: block; box-shadow: 0 4px 12px rgba(0,0,0,0.3);" onerror="this.style.display=\'none\'" alt="Header Image"/>\n'
-
-        # 3. Fast BeautifulSoup Pass
-        soup = BeautifulSoup(raw_html, 'html.parser')
-        
-        # --- THE FIX FOR THE JS CONSOLE ERROR ---
-        # Annihilate all scripts, styles, and iframes so HTMX doesn't execute malicious/broken code
-        for tag in soup.find_all(['script', 'style', 'iframe', 'noscript']):
-            tag.decompose()
-            
-        # --- THE FIX FOR THE BROKEN IMAGES ---
-        # Destroy <picture> and <source> wrappers so the browser CANNOT ignore our fixed <img> tag
-        for picture in soup.find_all('picture'):
-            img = picture.find('img')
-            if img:
-                picture.replace_with(img) # Rip the img out, destroy the picture wrapper
-            else:
-                picture.decompose()
-                
-        # Also destroy standalone <source> tags just in case
-        for source in soup.find_all('source'):
-            source.decompose()
-        
-        for a in soup.find_all('a'):
-            href = extract_real_url(a.get('href'), url)
-            if href:
-                a['href'] = href
-            a['target'] = '_blank'
-            a['style'] = 'color: #1095c1; text-decoration: none;'
-            
-        for img in soup.find_all('img'):
-            src = extract_real_url(img.get('src'), url)
-            if src:
-                img['src'] = src
-                img['referrerpolicy'] = 'no-referrer'
-                img['loading'] = 'lazy'
-                img['style'] = 'max-width: 100%; height: auto; border-radius: 8px; margin: 1.5rem auto; display: block; box-shadow: 0 4px 12px rgba(0,0,0,0.3);'
-                img['onerror'] = "this.style.display='none'"
-            else:
-                img.decompose()
-                continue
-                
-            # Strip competing layout & responsive attributes
-            for attr in ['class', 'width', 'height', 'srcset', 'sizes']:
-                if attr in img.attrs:
-                    del img[attr]
-
-        return header_image_html + str(soup)
+        return scrape_article_html(url)
 
     except Exception as e:
         import traceback
@@ -935,6 +961,118 @@ def summarize_single_article(text: str = Form(...)):
             return f"<p style='color: #ff4444;'>Error generating summary: {str(e)}</p>"
 
 
+
+
+@app.post("/reader/mark_read_bulk")
+def mark_read_bulk(urls: str = Form(...)):
+    # `urls` is a comma-separated list of article links.
+    url_list = [u.strip() for u in (urls or "").split(",") if u.strip()]
+    if not url_list:
+        return Response(status_code=200)
+
+    with Session(engine) as session:
+        existing = session.exec(select(ReadItem.item_link).where(ReadItem.item_link.in_(url_list))).all()
+        existing_set = {x for x in existing}
+
+        new_reads = [ReadItem(item_link=u) for u in url_list if u not in existing_set]
+        if new_reads:
+            session.add_all(new_reads)
+            session.commit()
+
+    return Response(status_code=200)
+
+
+@app.post("/reader/summarize_articles", response_class=HTMLResponse)
+def summarize_selected_articles(urls: str = Form(...), scrape: str = Form("0")):
+    """
+    Generate one combined HTML summary for multiple selected articles.
+    If `scrape` is enabled, each URL is scraped via the Postlight parser sidecar first.
+    """
+    url_list = [u.strip() for u in (urls or "").split(",") if u.strip()]
+    if not url_list:
+        return "<p>Error: No articles selected.</p>"
+
+    scrape_before = str(scrape).strip().lower() in ("1", "true", "yes", "on")
+
+    # Avoid runaway token usage.
+    max_selected = 10
+    if len(url_list) > max_selected:
+        return f"<p style='color: #ff4444;'>Error: Please select up to {max_selected} articles.</p>"
+
+    # Text limits
+    per_article_limit = 7000
+    overall_limit = 25000
+
+    with Session(engine) as session:
+        settings = get_settings(session)
+
+        cached_by_link = {}
+        for a in session.exec(select(CachedArticle).where(CachedArticle.link.in_(url_list))).all():
+            cached_by_link[a.link] = a
+
+    article_chunks = []
+    remaining = overall_limit
+
+    for idx, link in enumerate(url_list, start=1):
+        cached = cached_by_link.get(link)
+        title = (cached.title if cached else None) or f"Article {idx}"
+
+        try:
+            if scrape_before:
+                html = scrape_article_html(link)
+                text = html_to_plain_text(html)
+            else:
+                if not cached:
+                    continue
+                text = html_to_plain_text(cached.display_body)
+        except Exception as e:
+            logger.error(f"Batch summary scrape failed for {link}: {e}")
+            # Fallback to cached snippet if available.
+            if cached:
+                text = html_to_plain_text(cached.display_body)
+            else:
+                continue
+
+        text = truncate_text(text, per_article_limit).strip()
+        if len(text) < 20:
+            continue
+
+        chunk = f"Article {idx}: {title}\nURL: {link}\n\n{text}"
+
+        # Enforce overall cap
+        if len(chunk) > remaining:
+            chunk = truncate_text(chunk, remaining).strip()
+
+        article_chunks.append(chunk)
+        remaining -= len(chunk)
+        if remaining <= 0:
+            break
+
+    if not article_chunks:
+        return "<p style='color: #ff4444;'>Error: Could not extract enough text from the selected articles.</p>"
+
+    combined_text = "\n\n---\n\n".join(article_chunks)
+    combined_text = truncate_text(combined_text, overall_limit)
+
+    system_prompt = (
+        "You are an expert AI reading assistant. You will be given multiple articles. "
+        "Create a single combined summary. Include: (1) a short combined overview of key themes, "
+        "(2) a per-article set of key takeaways, and (3) any cross-article connections or notable differences. "
+        "Format your response in clean HTML using <p>, <ul>, <li>, and <strong> tags. "
+        "Do not include markdown code block syntax (like ```html)."
+    )
+
+    try:
+        summary_html = call_llm(
+            settings,
+            f"Summarize these articles together:\n\n{combined_text}",
+            system_prompt,
+        )
+        summary_html = summary_html.replace("```html", "").replace("```", "").strip()
+        return summary_html
+    except Exception as e:
+        logger.error(f"Batch Article Summary Failed: {e}")
+        return f"<p style='color: #ff4444;'>Error generating summary: {str(e)}</p>"
 
 
 @app.delete("/subscriptions/{sub_id}")
