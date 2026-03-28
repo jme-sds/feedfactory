@@ -21,6 +21,9 @@ import requests
 import re
 import concurrent.futures
 import html
+import hashlib
+import socket
+import ipaddress
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 import numpy as np
@@ -729,7 +732,7 @@ def get_feed_tiles(request: Request, category_id: str):
             "category_id": category_id, "category_name": cat_name, "total_unread": total_unread
         })
 import re
-from urllib.parse import urljoin, unquote, quote
+from urllib.parse import urljoin, unquote, quote, urlparse
 
 def extract_real_url(raw_url: str, base_url: str) -> str:
     """Uses Regex to aggressively extract true URLs from corrupted strings."""
@@ -777,9 +780,10 @@ def scrape_article_html(url: str) -> str:
     # Extract Lead Image Safely
     header_image_html = ""
     lead_image = extract_real_url(data.get("lead_image_url"), url)
-    if lead_image:
+    if lead_image and lead_image.startswith(("http://", "https://")):
+        proxied_lead = "/reader/image_proxy?url=" + quote(lead_image, safe="")
         header_image_html = (
-            f'<img src="{lead_image}" referrerpolicy="no-referrer" '
+            f'<img src="{proxied_lead}" '
             f'style="max-width: 100%; height: auto; border-radius: 8px; '
             f'margin-bottom: 1.5rem; display: block; box-shadow: 0 4px 12px rgba(0,0,0,0.3);" '
             f'onerror="this.style.display=\'none\'" alt="Header Image"/>\n'
@@ -812,20 +816,23 @@ def scrape_article_html(url: str) -> str:
 
     for img in soup.find_all('img'):
         src = extract_real_url(img.get('src'), url)
-        if src:
-            img['src'] = src
-            img['referrerpolicy'] = 'no-referrer'
-            img['loading'] = 'lazy'
-            img['style'] = (
-                'max-width: 100%; height: auto; border-radius: 8px; '
-                'margin: 1.5rem auto; display: block; box-shadow: 0 4px 12px rgba(0,0,0,0.3);'
-            )
-            img['onerror'] = "this.style.display='none'"
+        if src and src.startswith(("http://", "https://")):
+            img['src'] = "/reader/image_proxy?url=" + quote(src, safe="")
+        elif src and src.startswith("data:"):
+            img['src'] = src  # inline base64 — pass through as-is
         else:
             img.decompose()
+            continue
+
+        img['loading'] = 'lazy'
+        img['style'] = (
+            'max-width: 100%; height: auto; border-radius: 8px; '
+            'margin: 1.5rem auto; display: block; box-shadow: 0 4px 12px rgba(0,0,0,0.3);'
+        )
+        img['onerror'] = "this.style.display='none'"
 
         # Strip competing layout & responsive attributes
-        for attr in ['class', 'width', 'height', 'srcset', 'sizes']:
+        for attr in ['class', 'width', 'height', 'srcset', 'sizes', 'referrerpolicy']:
             if attr in img.attrs:
                 del img[attr]
 
@@ -851,11 +858,102 @@ def truncate_text(text: str, limit: int) -> str:
 def fetch_content(url: str = Form(...)):
     try:
         return scrape_article_html(url)
-
     except Exception as e:
         import traceback
         logger.error(f"Postlight Fetch Error: {traceback.format_exc()}")
         return f"<p style='color: #ff4444;'>Scrape Failed: {str(e)}</p>"
+
+
+# ── Image proxy ────────────────────────────────────────────────────────────────
+
+_IMAGE_CACHE: dict = {}        # sha256(url) -> (content_type, bytes)
+_IMAGE_CACHE_ORDER: list = []  # LRU eviction order
+_IMAGE_CACHE_MAX = 200
+
+_PROXY_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+def _cache_put(url_hash: str, content_type: str, data: bytes):
+    if url_hash in _IMAGE_CACHE:
+        _IMAGE_CACHE_ORDER.remove(url_hash)
+    elif len(_IMAGE_CACHE_ORDER) >= _IMAGE_CACHE_MAX:
+        evict = _IMAGE_CACHE_ORDER.pop(0)
+        _IMAGE_CACHE.pop(evict, None)
+    _IMAGE_CACHE[url_hash] = (content_type, data)
+    _IMAGE_CACHE_ORDER.append(url_hash)
+
+
+@app.get("/reader/image_proxy")
+def image_proxy(url: str):
+    """Server-side image proxy: fetches remote images to bypass hotlink/CORS restrictions."""
+    # Validate scheme
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid URL")
+
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http/https URLs are allowed")
+
+    hostname = parsed.hostname or ""
+    if not hostname:
+        raise HTTPException(status_code=400, detail="Invalid URL: no hostname")
+
+    # SSRF guard: block requests to private/loopback addresses
+    try:
+        resolved_ip = socket.gethostbyname(hostname)
+        ip_obj = ipaddress.ip_address(resolved_ip)
+        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
+            raise HTTPException(status_code=403, detail="Access to private addresses forbidden")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=502, detail="Could not resolve image host")
+
+    # Cache lookup
+    url_hash = hashlib.sha256(url.encode()).hexdigest()
+    if url_hash in _IMAGE_CACHE:
+        content_type, data = _IMAGE_CACHE[url_hash]
+        _IMAGE_CACHE_ORDER.remove(url_hash)
+        _IMAGE_CACHE_ORDER.append(url_hash)
+        return Response(content=data, media_type=content_type,
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+    # Fetch from origin
+    try:
+        r = requests.get(url, headers=_PROXY_HEADERS, timeout=15,
+                         allow_redirects=True, stream=True)
+    except requests.exceptions.RequestException as exc:
+        logger.warning(f"Image proxy fetch failed for {url}: {exc}")
+        raise HTTPException(status_code=502, detail="Failed to fetch image")
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail="Upstream image not available")
+
+    content_type = r.headers.get("Content-Type", "application/octet-stream").split(";")[0].strip()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=415, detail="Upstream URL did not return an image")
+
+    # Read body with 10 MB cap
+    MAX_BYTES = 10 * 1024 * 1024
+    chunks, total = [], 0
+    for chunk in r.iter_content(chunk_size=8192):
+        total += len(chunk)
+        if total > MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Image too large to proxy")
+        chunks.append(chunk)
+    data = b"".join(chunks)
+
+    _cache_put(url_hash, content_type, data)
+    return Response(content=data, media_type=content_type,
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 
@@ -971,8 +1069,8 @@ def mark_read_bulk(urls: str = Form(...)):
         return Response(status_code=200)
 
     with Session(engine) as session:
-        existing = session.exec(select(ReadItem.item_link).where(ReadItem.item_link.in_(url_list))).all()
-        existing_set = {x for x in existing}
+        existing = session.exec(select(ReadItem).where(ReadItem.item_link.in_(url_list))).all()
+        existing_set = {x.item_link for x in existing}
 
         new_reads = [ReadItem(item_link=u) for u in url_list if u not in existing_set]
         if new_reads:

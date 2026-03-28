@@ -15,11 +15,26 @@
         .nav-badge-btn:hover { background: rgba(255,255,255,0.1); border-color: var(--primary); color: var(--primary); }
         .nav-badge-btn.active { background: rgba(16, 149, 193, 0.2); border-color: var(--primary); color: var(--primary); }
         
-        /* Remove dropdown arrows */
+        /* Remove dropdown arrows and suppress Pico's open-summary bottom line */
         details.nav-dropdown summary { list-style: none !important; }
         details.nav-dropdown summary::-webkit-details-marker { display: none !important; }
         details.nav-dropdown summary::after { display: none !important; content: none !important; background-image: none !important; }
         details.nav-dropdown[open] summary { margin-bottom: 0 !important; }
+        /* Global: strip all Pico accordion chrome from every dropdown details */
+        details.dropdown {
+            border-bottom: none !important;
+            padding-bottom: 0 !important;
+            margin-bottom: 0 !important;
+        }
+        details.dropdown > summary {
+            padding: 0 !important;
+            margin: 0 !important;
+            border: none !important;
+        }
+        details.dropdown[open] > summary {
+            margin-bottom: 0 !important;
+            border-bottom: none !important;
+        }
 
         /* --- NEW: BOTTOM NAVIGATION BAR --- */
         .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(20, 20, 20, 0.95); backdrop-filter: blur(10px); border-top: 1px solid #333; z-index: 1000; display: flex; justify-content: space-around; padding: 0.5rem 0; padding-bottom: calc(0.5rem + env(safe-area-inset-bottom)); }
@@ -216,6 +231,15 @@
             fetch('/reader/force_sync', { method: 'POST' })
                 .then(() => alert('Background sync triggered! Articles will appear shortly.'));
         }
+
+        // Close any open <details> dropdown when clicking outside it
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('details')) {
+                document.querySelectorAll('details[open]').forEach(function(d) {
+                    d.removeAttribute('open');
+                });
+            }
+        });
 
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

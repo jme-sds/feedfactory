@@ -79,8 +79,8 @@
         <details class="dropdown tile-menu" name="tile-menu-group" onclick="event.stopPropagation();">
             <summary role="button"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg></summary>
             <ul>
-                <li><a href="#" hx-post="/reader/mark_category_read" hx-vals='{"category_id": "all"}' hx-target="#reader-container">Mark all read</a></li>
-                <li><a href="#" hx-post="/categories/all/create_collection">Create Collection</a></li>
+                <li><a href="#" onclick="this.closest('details').removeAttribute('open')" hx-post="/reader/mark_category_read" hx-vals='{"category_id": "all"}' hx-target="#reader-container">Mark all read</a></li>
+                <li><a href="#" onclick="this.closest('details').removeAttribute('open')" hx-post="/categories/all/create_collection">Create Collection</a></li>
             </ul>
         </details>
         <span class="cat-name">All Feeds</span>
@@ -94,8 +94,8 @@
             <details class="dropdown tile-menu" name="tile-menu-group" onclick="event.stopPropagation();">
                 <summary role="button"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg></summary>
                 <ul>
-                    <li><a href="#" hx-post="/reader/mark_category_read" hx-vals='{"category_id": "{{ cat.id }}"}' hx-target="#reader-container">Mark all read</a></li>
-                    <li><a href="#" hx-post="/categories/{{ cat.id }}/rename" hx-prompt="Enter new category name:" hx-target="#reader-container">Rename Category</a></li>
+                    <li><a href="#" onclick="this.closest('details').removeAttribute('open')" hx-post="/reader/mark_category_read" hx-vals='{"category_id": "{{ cat.id }}"}' hx-target="#reader-container">Mark all read</a></li>
+                    <li><a href="#" onclick="this.closest('details').removeAttribute('open')" hx-post="/categories/{{ cat.id }}/rename" hx-prompt="Enter new category name:" hx-target="#reader-container">Rename Category</a></li>
                 </ul>
             </details>
             <span class="cat-name" style="color: var(--primary);">✨ {{ cat.name }}</span>
@@ -111,10 +111,10 @@
             <details class="dropdown tile-menu" name="tile-menu-group" onclick="event.stopPropagation();">
                 <summary role="button"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg></summary>
                 <ul>
-                    <li><a href="#" hx-post="/reader/mark_category_read" hx-vals='{"category_id": "{{ cat.id }}"}' hx-target="#reader-container">Mark all read</a></li>
-                    <li><a href="#" hx-post="/categories/{{ cat.id }}/create_collection">Create Collection</a></li>
-                    <li><a href="#" hx-post="/categories/{{ cat.id }}/rename" hx-prompt="Enter new category name:" hx-target="#reader-container">Rename Category</a></li>
-                    <li><a href="#" style="color: #d93526 !important;" hx-delete="/categories/{{ cat.id }}" hx-confirm="Delete this category? Feeds will become uncategorized." hx-target="#reader-container">Delete Category</a></li>
+                    <li><a href="#" onclick="this.closest('details').removeAttribute('open')" hx-post="/reader/mark_category_read" hx-vals='{"category_id": "{{ cat.id }}"}' hx-target="#reader-container">Mark all read</a></li>
+                    <li><a href="#" onclick="this.closest('details').removeAttribute('open')" hx-post="/categories/{{ cat.id }}/create_collection">Create Collection</a></li>
+                    <li><a href="#" onclick="this.closest('details').removeAttribute('open')" hx-post="/categories/{{ cat.id }}/rename" hx-prompt="Enter new category name:" hx-target="#reader-container">Rename Category</a></li>
+                    <li><a href="#" onclick="this.closest('details').removeAttribute('open')" style="color: #d93526 !important;" hx-delete="/categories/{{ cat.id }}" hx-confirm="Delete this category? Feeds will become uncategorized." hx-target="#reader-container">Delete Category</a></li>
                 </ul>
             </details>
             <span class="cat-name">{{ cat.name }}</span>
@@ -129,8 +129,8 @@
         <details class="dropdown tile-menu" name="tile-menu-group" onclick="event.stopPropagation();">
             <summary role="button"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg></summary>
             <ul>
-                <li><a href="#" hx-post="/reader/mark_category_read" hx-vals='{"category_id": "none"}' hx-target="#reader-container">Mark all read</a></li>
-                <li><a href="#" hx-post="/categories/none/create_collection">Create Collection</a></li>
+                <li><a href="#" onclick="this.closest('details').removeAttribute('open')" hx-post="/reader/mark_category_read" hx-vals='{"category_id": "none"}' hx-target="#reader-container">Mark all read</a></li>
+                <li><a href="#" onclick="this.closest('details').removeAttribute('open')" hx-post="/categories/none/create_collection">Create Collection</a></li>
             </ul>
         </details>
         <span class="cat-name">Uncategorized</span>

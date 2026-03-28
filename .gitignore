@@ -2,3 +2,4 @@
 data
 tailscale-data
 .backup
+compose.yml

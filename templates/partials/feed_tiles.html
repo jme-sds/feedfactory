@@ -41,8 +41,8 @@
     .tile-menu { position: absolute; top: 8px; right: 8px; margin: 0; z-index: 50; }
     .tile-menu summary { padding: 0; margin: 0; border: none !important; background: transparent !important; color: #888; display: flex; align-items: center; justify-content: center; box-shadow: none !important; outline: none !important; width: 32px; height: 32px; border-radius: 50% !important; }
     .tile-menu summary:hover { color: var(--primary); background: rgba(255,255,255,0.1) !important; }
-    .tile-menu[open] summary { color: var(--primary); }
-    .tile-menu summary::after { display: none !important; } 
+    .tile-menu[open] summary { color: var(--primary); margin-bottom: 0 !important; border-bottom: none !important; }
+    .tile-menu summary::after { display: none !important; }
     .tile-menu ul { background: #141414 !important; border: 1px solid #444 !important; box-shadow: 0 8px 24px rgba(0,0,0,0.8) !important; border-radius: 8px !important; padding: 0.5rem !important; width: 160px; position: absolute; right: 0; left: auto; top: 100%; margin-top: 4px; z-index: 100; text-align: left; }
     .tile-menu ul li { margin: 0; padding: 0; list-style: none; }
     .tile-menu ul li a { display: block; padding: 0.5rem 0.8rem; border-radius: 4px; color: #ddd !important; font-size: 0.85rem; text-decoration: none; transition: background 0.1s; }
@@ -62,11 +62,11 @@
         <details class="dropdown tile-menu" name="tile-menu-group" onclick="event.stopPropagation();">
             <summary role="button"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg></summary>
             <ul>
-                <li><a href="#" hx-post="/reader/mark_feed_read" hx-vals='{"category_id": "{{ category_id }}", "feed_id": "{{ feed.id }}"}' hx-target="#reader-container">Mark feed read</a></li>
+                <li><a href="#" onclick="this.closest('details').removeAttribute('open')" hx-post="/reader/mark_feed_read" hx-vals='{"category_id": "{{ category_id }}", "feed_id": "{{ feed.id }}"}' hx-target="#reader-container">Mark feed read</a></li>
                 {% if feed.type == 'subscription' %}
                 <li><a href="#" onclick="openAddToCollectionModal('{{ feed.url }}'); this.closest('details').removeAttribute('open'); return false;">Add to Collection</a></li>
                 <li><a href="#" onclick="openChangeCategoryModal('{{ feed.db_id }}'); this.closest('details').removeAttribute('open'); return false;">Change Category</a></li>
-                <li><a href="#" style="color: #d93526 !important;" hx-delete="/subscriptions/{{ feed.db_id }}?category_id={{ category_id }}" hx-confirm="Unsubscribe from this feed completely?" hx-target="#reader-container">Delete Feed</a></li>
+                <li><a href="#" onclick="this.closest('details').removeAttribute('open')" style="color: #d93526 !important;" hx-delete="/subscriptions/{{ feed.db_id }}?category_id={{ category_id }}" hx-confirm="Unsubscribe from this feed completely?" hx-target="#reader-container">Delete Feed</a></li>
                 {% endif %}
             </ul>
         </details>
