@@ -68,6 +68,8 @@ class GlobalSettings(SQLModel, table=True):
     # --- NEW: PWA Offline Limit ---
     pwa_offline_limit: int = Field(default=200)
     default_focus_keywords: str = Field(default="")
+    scraper_backend: str = Field(default="postlight")
+    apify_api_key: Optional[str] = None
 
 class Category(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -580,7 +582,12 @@ async def lifespan(app: FastAPI):
         if env_api_key and settings.api_key != env_api_key:
             settings.api_key = env_api_key
             updated = True
-            
+
+        env_apify_key = os.environ.get("APIFY_API_KEY")
+        if env_apify_key and settings.apify_api_key != env_apify_key:
+            settings.apify_api_key = env_apify_key
+            updated = True
+
         if updated:
             session.add(settings)
         
@@ -760,6 +767,161 @@ def extract_real_url(raw_url: str, base_url: str) -> str:
     return cleaned
 
 
+def _is_instagram_url(url: str) -> bool:
+    return bool(re.search(r'instagram\.com', url, re.IGNORECASE))
+
+
+def scrape_article_html_apify(url: str, apify_api_key: str) -> str:
+    """
+    Scrape an article or Instagram post via Apify and return sanitized HTML.
+    - Instagram URLs: uses apify/instagram-scraper actor to fetch post data
+    - All other URLs: uses apify/article-extractor-smart actor
+    """
+    if not apify_api_key:
+        raise RuntimeError("Apify API key not configured. Set it in Settings or via APIFY_API_KEY env var.")
+
+    apify_base = "https://api.apify.com/v2"
+
+    if _is_instagram_url(url):
+        # --- Instagram scraper ---
+        actor_id = "apify~instagram-scraper"
+        run_input = {
+            "directUrls": [url],
+            "resultsType": "posts",
+            "resultsLimit": 1,
+        }
+        run_resp = requests.post(
+            f"{apify_base}/acts/{actor_id}/run-sync-get-dataset-items",
+            params={"token": apify_api_key, "timeout": 60, "memory": 256},
+            json=run_input,
+            timeout=90,
+        )
+        run_resp.raise_for_status()
+        items = run_resp.json()
+        if not items:
+            raise RuntimeError("Apify Instagram scraper returned no results for this URL.")
+
+        post = items[0]
+        caption = post.get("caption") or post.get("alt") or ""
+        owner = post.get("ownerUsername") or post.get("ownerId") or ""
+        timestamp = post.get("timestamp") or post.get("taken_at_timestamp") or ""
+        images: list = []
+
+        def _clean_apify_url(u) -> str:
+            """Strip stray quote chars Apify sometimes includes in URL strings."""
+            if not isinstance(u, str):
+                return ""
+            return u.strip().strip('"').strip("'").strip()
+
+        # Collect images/video thumbnails
+        raw_display = _clean_apify_url(post.get("displayUrl"))
+        if raw_display:
+            images.append(raw_display)
+        for sidecar in (post.get("childPosts") or post.get("sidecarImages") or []):
+            img_url = _clean_apify_url(sidecar.get("displayUrl") or sidecar.get("url"))
+            if img_url:
+                images.append(img_url)
+
+        # Build HTML
+        parts = []
+        if owner:
+            parts.append(f'<p style="color:#888; font-size:0.9rem; margin-bottom:0.5rem;">@{html.escape(owner)}</p>')
+        if timestamp:
+            parts.append(f'<p style="color:#666; font-size:0.85rem; margin-bottom:1rem;">{html.escape(str(timestamp))}</p>')
+        for img_url in images:
+            if img_url.startswith(("http://", "https://")):
+                # Instagram CDN images are signed with session cookies — render directly,
+                # do NOT proxy them through the server (proxy would get 403 from Instagram).
+                parts.append(
+                    f'<img src="{html.escape(img_url)}" loading="lazy" crossorigin="anonymous" '
+                    f'style="max-width:100%;height:auto;border-radius:8px;margin:1rem auto;display:block;box-shadow:0 4px 12px rgba(0,0,0,0.3);" '
+                    f'onerror="this.style.display=\'none\'" alt="Instagram post image"/>'
+                )
+        if caption:
+            escaped = html.escape(caption).replace("\n", "<br>")
+            parts.append(f'<p style="margin-top:1.5rem;line-height:1.7;">{escaped}</p>')
+
+        return "\n".join(parts) if parts else "<p>No content found in this Instagram post.</p>"
+
+    else:
+        # --- General article extractor ---
+        # Uses lukaskrivka/article-extractor-smart — a well-known community actor
+        actor_id = "lukaskrivka~article-extractor-smart"
+        run_input = {"startUrls": [{"url": url}], "proxyConfiguration": {"useApifyProxy": True}}
+        run_resp = requests.post(
+            f"{apify_base}/acts/{actor_id}/run-sync-get-dataset-items",
+            params={"token": apify_api_key, "timeout": 60, "memory": 256},
+            json=run_input,
+            timeout=90,
+        )
+        run_resp.raise_for_status()
+        items = run_resp.json()
+        if not items:
+            raise RuntimeError("Apify article extractor returned no results for this URL.")
+
+        article = items[0]
+        # Actor returns: text (plain), loadedContent/content (HTML), topImage/image
+        raw_html = (article.get("loadedContent") or article.get("content")
+                    or article.get("text") or "")
+        if not raw_html:
+            raise RuntimeError("Apify article extractor could not extract content from this page.")
+
+        # Lead image — check multiple field names the actor may use
+        header_image_html = ""
+        lead_image = (article.get("topImage") or article.get("image")
+                      or article.get("featuredImage") or "")
+        if lead_image and isinstance(lead_image, str) and lead_image.startswith(("http://", "https://")):
+            proxied_lead = "/reader/image_proxy?url=" + quote(lead_image, safe="")
+            header_image_html = (
+                f'<img src="{proxied_lead}" '
+                f'style="max-width:100%;height:auto;border-radius:8px;'
+                f'margin-bottom:1.5rem;display:block;box-shadow:0 4px 12px rgba(0,0,0,0.3);" '
+                f'onerror="this.style.display=\'none\'" alt="Header Image"/>\n'
+            )
+
+        # If text is plain or markdown-ish, wrap in a <p>
+        if not raw_html.strip().startswith("<"):
+            raw_html = "<p>" + raw_html.replace("\n\n", "</p><p>").replace("\n", "<br>") + "</p>"
+
+        soup = BeautifulSoup(raw_html, 'html.parser')
+        for tag in soup.find_all(['script', 'style', 'iframe', 'noscript']):
+            tag.decompose()
+        for picture in soup.find_all('picture'):
+            img = picture.find('img')
+            if img:
+                picture.replace_with(img)
+            else:
+                picture.decompose()
+        for source in soup.find_all('source'):
+            source.decompose()
+        for a in soup.find_all('a'):
+            href = extract_real_url(a.get('href'), url)
+            if href:
+                a['href'] = href
+            a['target'] = '_blank'
+            a['style'] = 'color:#1095c1;text-decoration:none;'
+        for img in soup.find_all('img'):
+            src = extract_real_url(img.get('src'), url)
+            if src and src.startswith(("http://", "https://")):
+                img['src'] = "/reader/image_proxy?url=" + quote(src, safe="")
+            elif src and src.startswith("data:"):
+                img['src'] = src
+            else:
+                img.decompose()
+                continue
+            img['loading'] = 'lazy'
+            img['style'] = (
+                'max-width:100%;height:auto;border-radius:8px;'
+                'margin:1.5rem auto;display:block;box-shadow:0 4px 12px rgba(0,0,0,0.3);'
+            )
+            img['onerror'] = "this.style.display='none'"
+            for attr in ['class', 'width', 'height', 'srcset', 'sizes', 'referrerpolicy']:
+                if attr in img.attrs:
+                    del img[attr]
+
+        return header_image_html + str(soup)
+
+
 def scrape_article_html(url: str) -> str:
     """
     Fetch and parse an article via the Postlight parser sidecar, then sanitize HTML for safe rendering.
@@ -857,10 +1019,14 @@ def truncate_text(text: str, limit: int) -> str:
 @app.post("/reader/fetch_content")
 def fetch_content(url: str = Form(...)):
     try:
+        with Session(engine) as session:
+            settings = get_settings(session)
+        if settings.scraper_backend == "apify":
+            return scrape_article_html_apify(url, settings.apify_api_key or "")
         return scrape_article_html(url)
     except Exception as e:
         import traceback
-        logger.error(f"Postlight Fetch Error: {traceback.format_exc()}")
+        logger.error(f"Scrape Error: {traceback.format_exc()}")
         return f"<p style='color: #ff4444;'>Scrape Failed: {str(e)}</p>"
 
 
@@ -1423,6 +1589,8 @@ async def update_global_settings(request: Request):
         if form.get("reader_font_size") is not None: settings.reader_font_size = form.get("reader_font_size")
         if form.get("reader_line_height") is not None: settings.reader_line_height = form.get("reader_line_height")
         if form.get("default_focus_keywords") is not None: settings.default_focus_keywords = form.get("default_focus_keywords")
+        if form.get("scraper_backend") is not None: settings.scraper_backend = form.get("scraper_backend")
+        if form.get("apify_api_key") is not None: settings.apify_api_key = form.get("apify_api_key")
         
         # Safely extract and apply integers
         try:

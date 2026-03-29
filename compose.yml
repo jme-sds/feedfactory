@@ -9,6 +9,7 @@ services:
       #      - HF_SPACE=${HF_SPACE}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+      - APIFY_API_KEY=${APIFY_API_KEY}
       - TZ=America/New_York
     volumes:
       - ./data:/app/data  # Persist the SQLite DB and XML files
