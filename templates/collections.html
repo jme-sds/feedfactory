@@ -345,7 +345,22 @@
                             <input type="text" name="focus_keywords" value="{{ col.focus_keywords if col.focus_keywords else '' }}" placeholder="e.g. AI, Space, Robotics">
                             <small style="color: #888;">Only articles containing at least one of these words will be sent to the LLM. Leave blank to process all articles.</small>
                         </label>
-                        
+
+                        <div class="grid" style="margin-top: 1.5rem;">
+                            <label>Historical Articles (RAG Top-K)
+                                <input type="number" name="rag_top_k" value="{{ col.rag_top_k }}" min="0" max="20">
+                                <small style="color: #888;">Set to 0 to disable RAG context injection.</small>
+                            </label>
+                            <label>Min Similarity Threshold
+                                <input type="number" name="rag_min_similarity" value="{{ col.rag_min_similarity }}" step="0.05" min="0" max="1">
+                                <small style="color: #888;">Cosine similarity (0–1). Lower = more results, less relevant.</small>
+                            </label>
+                            <label>Vector Eviction Age (Days)
+                                <input type="number" name="rag_eviction_days" value="{{ col.rag_eviction_days }}" min="1">
+                                <small style="color: #888;">Vectors idle longer than this are deleted nightly.</small>
+                            </label>
+                        </div>
+
                         <div style="text-align: right; margin-top: 1rem;">
                             <button type="submit" class="outline btn-sm">Save Settings</button>
                         </div>

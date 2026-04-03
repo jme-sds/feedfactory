@@ -6,6 +6,7 @@
 
     <form id="global-settings-form" hx-post="/settings/update" hx-target="#settings-msg" novalidate>
         
+        {% if not demo_mode %}
         <details name="settings-accordion" open>
             <summary><strong>1. AI Provider (OpenAI Compatible)</strong></summary>
             <div style="padding-top: 1rem;">
@@ -15,7 +16,17 @@
                 </label>
                 <div class="grid">
                     <label>API Key
-                        <input type="password" name="api_key" value="{{ settings.api_key if settings.api_key else '' }}" placeholder="sk-...">
+                        {% if api_key_is_set %}
+                        <div style="display: flex; align-items: center; gap: 8px; padding: 0.5rem 0;">
+                            <span style="color: #4CAF50; font-weight: bold;">&#10003; API key is set</span>
+                        </div>
+                        <input type="password" name="api_key" value="" placeholder="Enter new key to replace">
+                        {% else %}
+                        <div style="display: flex; align-items: center; gap: 8px; padding: 0.5rem 0;">
+                            <span style="color: #ff4444;">&#10007; No API key configured</span>
+                        </div>
+                        <input type="password" name="api_key" value="" placeholder="sk-...">
+                        {% endif %}
                     </label>
                     <label>Model Name
                         <input type="text" name="model_name" value="{{ settings.model_name }}" required placeholder="gpt-4o-mini">
@@ -24,8 +35,8 @@
 
                 <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px; margin-bottom: 20px;">
                     <button type="button" class="secondary outline btn-sm" style="margin: 0; width: auto;"
-                            hx-post="/settings/test_llm" 
-                            hx-include="#global-settings-form" 
+                            hx-post="/settings/test_llm"
+                            hx-include="#global-settings-form"
                             hx-target="#test-llm-result"
                             hx-indicator="#test-spinner">
                         Test Connection
@@ -35,6 +46,7 @@
                 </div>
             </div>
         </details>
+        {% endif %}
 
         <details name="settings-accordion">
             <summary><strong>2. Reader Auto-Cleanup</strong></summary>
@@ -83,32 +95,7 @@
         </details>
 
         <details name="settings-accordion">
-            <summary><strong>4. Article Scraper</strong></summary>
-            <div style="padding-top: 1rem;">
-                <p style="font-size: 0.9rem; color: #888; margin-bottom: 1.5rem;">
-                    Choose the scraper used when you open an article in the reader.
-                    <strong>Postlight</strong> (free, no images from some sites) is always used for digest generation and multi-select summaries to protect API credits.
-                </p>
-                <fieldset>
-                    <legend>Scraper Backend</legend>
-                    <label>
-                        <input type="radio" name="scraper_backend" value="postlight" {% if settings.scraper_backend != 'apify' %}checked{% endif %}>
-                        Postlight Parser (free, built-in sidecar)
-                    </label>
-                    <label>
-                        <input type="radio" name="scraper_backend" value="apify" {% if settings.scraper_backend == 'apify' %}checked{% endif %}>
-                        Apify (paid, supports images &amp; Instagram)
-                    </label>
-                </fieldset>
-                <label style="margin-top: 1rem;">Apify API Key
-                    <input type="password" name="apify_api_key" value="{{ settings.apify_api_key if settings.apify_api_key else '' }}" placeholder="apify_api_...">
-                    <small style="color: #888;">Used only when Apify is selected. Leave blank to rely on the <code>APIFY_API_KEY</code> environment variable.</small>
-                </label>
-            </div>
-        </details>
-
-        <details name="settings-accordion">
-            <summary><strong>5. Reader Typography</strong></summary>
+            <summary><strong>4. Reader Typography</strong></summary>
             <div style="padding-top: 1rem;">
                 <p style="font-size: 0.9rem; color: #888; margin-bottom: 1.5rem;">Customize the reading experience.</p>
                 <div class="grid">
@@ -126,7 +113,7 @@
         </details>
 
         <details name="settings-accordion">
-            <summary><strong>6. Storage & Offline (PWA)</strong></summary>
+            <summary><strong>5. Storage & Offline (PWA)</strong></summary>
             <div style="padding-top: 1rem;">
                 <p style="font-size: 0.9rem; color: #888; margin-bottom: 1.5rem;">Configure how many articles are cached for offline reading when the app is installed to your home screen.</p>
                 <label>Offline Article Limit
@@ -143,8 +130,9 @@
         
     </form> <br><br>
 
+    {% if not demo_mode %}
     <details name="settings-accordion">
-        <summary><strong>7. Data Backup & Restore</strong></summary>
+        <summary><strong>6. Data Backup & Restore</strong></summary>
         <div style="padding-top: 1rem;">
             <p style="font-size: 0.9rem; color: #888; margin-bottom: 1.5rem;">Download a complete backup of your database, or restore from a previous backup.</p>
             
@@ -168,6 +156,7 @@
             </form>
         </div>
     </details>
+    {% endif %}
 
 </div>
 {% endblock %}

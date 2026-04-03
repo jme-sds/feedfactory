@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="1.0">
+  <head>
+    <title>Feed Factory Demo Subscriptions</title>
+  </head>
+  <body>
+    <!-- Add your baseline feeds here. Example:
+    <outline type="rss" text="Ars Technica" xmlUrl="https://feeds.arstechnica.com/arstechnica/index" category="Tech"/>
+    <outline type="rss" text="Hacker News" xmlUrl="https://hnrss.org/frontpage" category="Tech"/>
+    -->
+  </body>
+</opml>

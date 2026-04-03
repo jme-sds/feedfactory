@@ -223,7 +223,7 @@
         try {
             const formData = new FormData();
             formData.append('urls', links.join(','));
-            const response = await fetch('/reader/mark_read_bulk', { method: 'POST', body: formData });
+            const response = await fetch('/reader/mark_read_bulk', { method: 'POST', body: formData, headers: { 'X-CSRF-Token': getCsrfToken() } });
             if (!response.ok) throw new Error('Failed to mark as read.');
 
             // Update UI immediately
@@ -265,7 +265,7 @@
             formData.append('urls', links.join(','));
             formData.append('scrape', scrape ? '1' : '0');
 
-            const response = await fetch('/reader/summarize_articles', { method: 'POST', body: formData });
+            const response = await fetch('/reader/summarize_articles', { method: 'POST', body: formData, headers: { 'X-CSRF-Token': getCsrfToken() } });
             if (!response.ok) throw new Error('Failed to generate summary.');
             const html = await response.text();
 

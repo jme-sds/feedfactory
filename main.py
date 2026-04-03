@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Form, Depends, HTTPException, UploadFile, File, Header, BackgroundTasks
-from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Session, SQLModel, create_engine, select, or_, and_, Field, Relationship
 from sqlalchemy import inspect, text
@@ -21,12 +21,18 @@ import requests
 import re
 import concurrent.futures
 import html
+import json
+import hmac
+import secrets
 import hashlib
 import socket
 import ipaddress
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 import numpy as np
+import array
+import sqlite_vec
+from sqlalchemy import event
 
 
 
@@ -46,6 +52,13 @@ Output valid HTML. Use <h3> for the category title and <p> for the narrative. Do
 
 
 engine = create_engine(DATABASE_URL)
+
+@event.listens_for(engine, "connect")
+def load_sqlite_vec(dbapi_conn, connection_record):
+    dbapi_conn.enable_load_extension(True)
+    sqlite_vec.load(dbapi_conn)
+    dbapi_conn.enable_load_extension(False)
+
 templates = Jinja2Templates(directory="templates")
 
 # --- Models ---
@@ -68,8 +81,6 @@ class GlobalSettings(SQLModel, table=True):
     # --- NEW: PWA Offline Limit ---
     pwa_offline_limit: int = Field(default=200)
     default_focus_keywords: str = Field(default="")
-    scraper_backend: str = Field(default="postlight")
-    apify_api_key: Optional[str] = None
 
 class Category(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -83,14 +94,27 @@ class Collection(SQLModel, table=True):
     last_run: Optional[datetime.datetime] = None
     is_generating: bool = Field(default=False)
     system_prompt: Optional[str] = Field(default=None)
-    context_length: int = Field(default=200) 
-    filter_max_articles: int = Field(default=0) 
-    filter_age: str = Field(default="24h") 
+    context_length: int = Field(default=200)
+    filter_max_articles: int = Field(default=0)
+    filter_age: str = Field(default="24h")
     category_id: Optional[int] = Field(default=None, foreign_key="category.id")
     feeds: List["Feed"] = Relationship(back_populates="collection")
     focus_keywords: str = Field(default="")
     max_articles_per_topic: int = Field(default=4)
     is_active: bool = Field(default=True)
+    rag_top_k: int = Field(default=3)
+    rag_min_similarity: float = Field(default=0.60)
+    rag_eviction_days: int = Field(default=14)
+
+class ArticleVector(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    collection_id: int = Field(foreign_key="collection.id", index=True)
+    title: str
+    content: str
+    url: str = Field(index=True)
+    embedding: bytes
+    last_retrieved_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
+    retrieval_count: int = Field(default=0)
 
 class Feed(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -129,6 +153,17 @@ class CachedArticle(SQLModel, table=True):
 def clean_model_id(raw_id: str) -> str:
     if not raw_id: return ""
     return str(raw_id).replace('\\"', '').strip(' "\'')
+
+def _sanitize_css_value(val: str) -> str:
+    """Strip characters that could break out of a CSS property value context."""
+    if not val:
+        return val
+    # Remove anything that could close a style block or inject HTML/JS
+    return re.sub(r'[<>{};\\]', '', val)
+
+def _sanitize_slug(slug: str) -> str:
+    """Ensure a slug is safe for use in filesystem paths — alphanumeric, hyphens, underscores only."""
+    return re.sub(r'[^a-zA-Z0-9_-]', '', slug)
 
 def get_settings(session: Session) -> GlobalSettings:
     settings = session.get(GlobalSettings, 1)
@@ -214,29 +249,40 @@ def cleanup_old_articles():
 def call_llm(settings: GlobalSettings, user_message: str, system_prompt: str) -> str:
     # Always use the standard OpenAI/LiteLLM REST format
     headers = {
-        "Authorization": f"Bearer {settings.api_key}", 
+        "Authorization": f"Bearer {settings.api_key}",
         "Content-Type": "application/json"
     }
-    
+
     clean_model = clean_model_id(settings.model_name)
     payload = {
         "model": clean_model,
         "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}],
         "max_tokens": 4000,
-        "temperature": 0.7, 
+        "temperature": 0.7,
         "stream": False
     }
-    
+
+    t0 = time.time()
     try:
         response = requests.post(settings.api_endpoint, headers=headers, json=payload, timeout=180)
         if not response.ok:
             logger.error(f"LLM Rejected Payload. Status: {response.status_code}")
             logger.error(f"LLM Error Body: {response.text}")
-            
+
         response.raise_for_status()
         data = response.json()
+        usage = data.get("usage", {})
+        latency_ms = round((time.time() - t0) * 1000, 1)
+        logger.info("[LLM] %s", {
+            "model": clean_model,
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+            "latency_ms": latency_ms,
+            "endpoint": settings.api_endpoint,
+        })
         return data['choices'][0]['message']['content']
-        
+
     except Exception as e:
         logger.error(f"LLM Call Failed: {e}")
         raise e
@@ -379,8 +425,12 @@ def generate_digest_for_collection(collection_id: int):
                 all_entries = all_entries[:collection.filter_max_articles]
             all_entries = all_entries[:100]
 
-            # --- Pass the new topic limit setting to the clusterer ---
-            article_clusters = cluster_articles(all_entries, num_clusters=5, max_per_topic=collection.max_articles_per_topic)
+            # --- Cluster articles; embeddings stored AFTER generation to keep RAG search space historical-only ---
+            article_clusters, current_embeddings = cluster_articles(
+                all_entries,
+                num_clusters=5,
+                max_per_topic=collection.max_articles_per_topic,
+            )
 
 
 
@@ -401,27 +451,66 @@ def generate_digest_for_collection(collection_id: int):
             logger.info(f"[Digest] 🧠 Firing {len(article_clusters)} parallel LLM calls for each topic cluster...")
             
             # Define the worker function for the LLM + Python HTML Builder
-            def process_cluster(cluster):
+            def process_cluster(cluster_and_embedding):
+                cluster, center_embedding = cluster_and_embedding
+
+                # RAG: retrieve historical context using the cluster's center embedding
+                historical = []
+                if collection.rag_top_k > 0:
+                    historical = retrieve_historical_context(
+                        center_embedding,
+                        collection.id,
+                        collection.rag_top_k,
+                        collection.rag_min_similarity,
+                    )
+
                 # 1. Prepare the text context for the LLM
                 context = "\n".join([a["formatted"] for a in cluster])
-                user_msg = f"Here are the related articles for this topic:\n\n{context}\n\nWrite this section of the digest."
-                
+
+                historical_block = ""
+                if historical:
+                    hist_parts = [
+                        f"Title: {h['title']}\nURL: {h['url']}\nSummary: {h['content']}"
+                        for h in historical
+                    ]
+                    historical_block = (
+                        "\n\n<historical_context>\n"
+                        + "\n---\n".join(hist_parts)
+                        + "\n</historical_context>"
+                    )
+
+                user_msg = (
+                    f"Here are the related articles for this topic:\n\n{context}"
+                    + historical_block
+                    + "\n\nWrite this section of the digest."
+                )
+
                 # 2. Get the narrative paragraph from the LLM
                 llm_narrative = call_llm(settings, user_msg, active_prompt)
-                
+
                 # 3. Programmatically build the perfectly formatted Sources HTML
                 sources_html = "\n<h5 style='margin-top: 1rem; margin-bottom: 0.5rem; color: #888;'>Sources:</h5>\n<ul style='font-size: 0.9rem; margin-bottom: 1.5rem;'>\n"
-                
+
                 # We use html.escape on the title just in case the article title has weird characters like < or >
                 for article in cluster:
                     safe_title = html.escape(article['title'])
                     safe_link = article['link']
                     sources_html += f"    <li style='margin-bottom: 0.25rem;'><a href='{safe_link}' target='_blank' style='color: #1095c1; text-decoration: none;'>{safe_title}</a></li>\n"
-                
+
                 sources_html += "</ul>\n"
-                
-                # 4. Stitch the LLM narrative and the Python Sources list together
-                return f"{llm_narrative}\n{sources_html}"
+
+                # 5. Programmatically build the Context (RAG) section
+                context_html = ""
+                if historical:
+                    context_html = "\n<h5 style='margin-top: 1rem; margin-bottom: 0.5rem; color: #888;'>Context:</h5>\n<ul style='font-size: 0.9rem; margin-bottom: 1.5rem;'>\n"
+                    for h in historical:
+                        safe_title = html.escape(h['title'])
+                        safe_link = h['url']
+                        context_html += f"    <li style='margin-bottom: 0.25rem;'><a href='{safe_link}' target='_blank' style='color: #888; text-decoration: none;'>{safe_title}</a></li>\n"
+                    context_html += "</ul>\n"
+
+                # 6. Stitch the LLM narrative, Sources, and Context together
+                return f"{llm_narrative}\n{sources_html}{context_html}"
 
             # Fire off the LLM calls simultaneously
             cluster_html_results = []
@@ -433,6 +522,9 @@ def generate_digest_for_collection(collection_id: int):
 
             # Stitch the 5 perfectly written sections together
             final_html = "\n<br><hr style='border-color: #333;'><br>\n".join(cluster_html_results)
+
+            # Store today's embeddings NOW — after retrieval — so they don't pollute the RAG search space
+            _store_article_vectors(all_entries, current_embeddings, collection.id)
 
 
 
@@ -506,6 +598,390 @@ def upgrade_db_schema(engine):
                         logger.error(f"Failed to migrate column {column.name} in {table_name}: {e}")
         session.commit()
 
+# --- RAG Pipeline ---
+
+def _store_article_vectors(articles: List[dict], embeddings, collection_id: int):
+    """Upsert article embeddings into ArticleVector table and the vec_articles virtual table."""
+    with Session(engine) as session:
+        stored = 0
+        for article, emb in zip(articles, embeddings):
+            existing = session.exec(
+                select(ArticleVector)
+                .where(ArticleVector.url == article["link"])
+                .where(ArticleVector.collection_id == collection_id)
+            ).first()
+            blob = array.array('f', emb.astype(float)).tobytes()
+            if existing is None:
+                av = ArticleVector(
+                    collection_id=collection_id,
+                    title=article["title"],
+                    content=article["text"],
+                    url=article["link"],
+                    embedding=blob,
+                )
+                session.add(av)
+                session.flush()
+                session.execute(text(
+                    "INSERT INTO vec_articles(rowid, embedding, collection_id) VALUES (:rid, :emb, :cid)"
+                ), {"rid": av.id, "emb": blob, "cid": collection_id})
+                stored += 1
+            else:
+                existing.embedding = blob
+                session.add(existing)
+                session.execute(text(
+                    "UPDATE vec_articles SET embedding = :emb WHERE rowid = :rid"
+                ), {"emb": blob, "rid": existing.id})
+        session.commit()
+    logger.info(f"[RAG] Stored/updated {stored} new article vectors for collection {collection_id}.")
+
+
+def retrieve_historical_context(
+    query_embedding,
+    collection_id: int,
+    top_k: int,
+    min_similarity: float = 0.60,
+) -> List[dict]:
+    """KNN vector search against vec_articles, with LRU bookkeeping on hits."""
+    if top_k <= 0:
+        return []
+    t0 = time.time()
+    blob = array.array('f', query_embedding.astype(float)).tobytes()
+    with Session(engine) as session:
+        result_proxy = session.execute(text("""
+            SELECT av.id, av.title, av.content, av.url,
+                   vec_distance_cosine(va.embedding, :qemb) AS distance
+            FROM vec_articles va
+            JOIN articlevector av ON av.id = va.rowid
+            WHERE va.collection_id = :cid
+            ORDER BY distance ASC
+            LIMIT :k
+        """), {"qemb": blob, "cid": collection_id, "k": top_k * 3})
+        rows = result_proxy.fetchall()
+
+        results = []
+        for row in rows:
+            similarity = 1.0 - (row.distance / 2.0)
+            if similarity >= min_similarity:
+                results.append(row)
+                if len(results) >= top_k:
+                    break
+
+        retrieved_ids = [r.id for r in results]
+        if retrieved_ids:
+            placeholders = ",".join(str(i) for i in retrieved_ids)
+            session.execute(text(
+                f"UPDATE articlevector "
+                f"SET last_retrieved_at = :now, retrieval_count = retrieval_count + 1 "
+                f"WHERE id IN ({placeholders})"
+            ), {"now": datetime.datetime.now()})
+            session.commit()
+
+    latency_ms = (time.time() - t0) * 1000
+    logger.info(
+        f"[RAG] Vector search: {latency_ms:.1f}ms | "
+        f"retrieved={len(results)}/{top_k} | "
+        f"collection={collection_id}"
+    )
+    return [{"title": r.title, "content": r.content, "url": r.url} for r in results]
+
+
+def prune_stale_vectors(max_idle_days: int):
+    """Delete ArticleVector rows not retrieved within max_idle_days."""
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=max_idle_days)
+    with Session(engine) as session:
+        stale = session.exec(
+            select(ArticleVector).where(ArticleVector.last_retrieved_at < cutoff)
+        ).all()
+        evicted = len(stale)
+        for av in stale:
+            session.execute(text("DELETE FROM vec_articles WHERE rowid = :rid"), {"rid": av.id})
+            session.delete(av)
+        session.commit()
+    logger.info(f"[RAG] Nightly GC: evicted {evicted} stale vectors (idle > {max_idle_days}d).")
+
+
+def run_nightly_prune():
+    """APScheduler target: prune stale vectors per collection's eviction setting."""
+    with Session(engine) as session:
+        collections = session.exec(select(Collection)).all()
+    for col in collections:
+        prune_stale_vectors(col.rag_eviction_days)
+
+
+# ==========================================
+#          DEMO MODE HOUSEKEEPING
+# ==========================================
+
+DEMO_SNAPSHOT_PATH = "/app/data/demo_snapshot.json"
+DEMO_OPML_PATH = "/app/demo_feeds.opml"
+
+
+def _import_opml_subscriptions(session: Session):
+    """Import subscriptions from demo_feeds.opml if it exists."""
+    if not os.path.exists(DEMO_OPML_PATH):
+        return
+    with open(DEMO_OPML_PATH, "r") as f:
+        root = ET.fromstring(f.read())
+    body = root.find("body")
+    if body is None:
+        return
+
+    def parse_outlines(elements, current_category=None):
+        for elem in elements:
+            if not elem.tag.endswith("outline"):
+                continue
+            url = elem.get("xmlUrl") or elem.get("url")
+            title = elem.get("text") or elem.get("title") or url
+            cat = elem.get("category") or current_category
+            if url:
+                cat_id = None
+                if cat:
+                    cat_obj = session.exec(select(Category).where(Category.name == cat)).first()
+                    if not cat_obj:
+                        cat_obj = Category(name=cat)
+                        session.add(cat_obj)
+                        session.commit()
+                        session.refresh(cat_obj)
+                    cat_id = cat_obj.id
+                if not session.exec(select(Subscription).where(Subscription.url == url)).first():
+                    session.add(Subscription(url=url, title=title, category_id=cat_id))
+            else:
+                folder_title = elem.get("title") or elem.get("text")
+                parse_outlines(list(elem), current_category=folder_title)
+
+    parse_outlines(list(body))
+    session.commit()
+
+
+def demo_take_snapshot():
+    """Capture the current DB state as the demo baseline (settings, categories,
+    subscriptions, collections with their feeds). Called once on first boot."""
+    logger.info("[Demo] Taking baseline snapshot...")
+    with Session(engine) as session:
+        settings = get_settings(session)
+        snapshot = {
+            "settings": {
+                "api_endpoint": settings.api_endpoint,
+                "model_name": settings.model_name,
+                "default_schedule": settings.default_schedule,
+                "default_context_length": settings.default_context_length,
+                "default_filter_max": settings.default_filter_max,
+                "default_filter_age": settings.default_filter_age,
+                "default_system_prompt": settings.default_system_prompt,
+                "retention_read_days": settings.retention_read_days,
+                "retention_unread_days": settings.retention_unread_days,
+                "reader_font_family": settings.reader_font_family,
+                "reader_font_size": settings.reader_font_size,
+                "reader_line_height": settings.reader_line_height,
+                "pwa_offline_limit": settings.pwa_offline_limit,
+                "default_focus_keywords": settings.default_focus_keywords,
+            },
+            "categories": [
+                {"name": c.name}
+                for c in session.exec(select(Category)).all()
+            ],
+            "subscriptions": [
+                {
+                    "url": s.url,
+                    "title": s.title,
+                    "category_name": (
+                        session.get(Category, s.category_id).name
+                        if s.category_id else None
+                    ),
+                }
+                for s in session.exec(select(Subscription)).all()
+            ],
+            "collections": [],
+        }
+        for col in session.exec(select(Collection)).all():
+            cat_name = session.get(Category, col.category_id).name if col.category_id else None
+            snapshot["collections"].append({
+                "name": col.name,
+                "slug": col.slug,
+                "schedule_time": col.schedule_time,
+                "system_prompt": col.system_prompt,
+                "context_length": col.context_length,
+                "filter_max_articles": col.filter_max_articles,
+                "filter_age": col.filter_age,
+                "focus_keywords": col.focus_keywords,
+                "max_articles_per_topic": col.max_articles_per_topic,
+                "is_active": col.is_active,
+                "rag_top_k": col.rag_top_k,
+                "rag_min_similarity": col.rag_min_similarity,
+                "rag_eviction_days": col.rag_eviction_days,
+                "category_name": cat_name,
+                "feeds": [f.url for f in col.feeds],
+            })
+
+    with open(DEMO_SNAPSHOT_PATH, "w") as f:
+        json.dump(snapshot, f, indent=2)
+    logger.info(f"[Demo] Snapshot saved: {len(snapshot['subscriptions'])} subscriptions, "
+                f"{len(snapshot['collections'])} collections, {len(snapshot['categories'])} categories.")
+
+
+def demo_restore_snapshot():
+    """Restore the demo baseline: reset settings, remove user-added entities,
+    re-create removed ones, fix moved feeds. Preserves CachedArticle and
+    ArticleVector data for feeds that belong to the baseline."""
+    if not os.path.exists(DEMO_SNAPSHOT_PATH):
+        logger.warning("[Demo] No snapshot found, skipping restore.")
+        return
+
+    logger.info("[Demo] Restoring demo baseline...")
+    with open(DEMO_SNAPSHOT_PATH, "r") as f:
+        snapshot = json.load(f)
+
+    with Session(engine) as session:
+        # --- 1. Restore GlobalSettings (skip api_key — that comes from env) ---
+        settings = get_settings(session)
+        for key, val in snapshot["settings"].items():
+            setattr(settings, key, val)
+        session.add(settings)
+
+        # --- 2. Restore Categories ---
+        snapshot_cat_names = {c["name"] for c in snapshot["categories"]}
+        existing_cats = session.exec(select(Category)).all()
+
+        # Remove user-added categories
+        for cat in existing_cats:
+            if cat.name not in snapshot_cat_names:
+                # Unlink anything referencing this category before deleting
+                for sub in session.exec(select(Subscription).where(Subscription.category_id == cat.id)).all():
+                    sub.category_id = None
+                    session.add(sub)
+                for col in session.exec(select(Collection).where(Collection.category_id == cat.id)).all():
+                    col.category_id = None
+                    session.add(col)
+                for art in session.exec(select(CachedArticle).where(CachedArticle.category_id == cat.id)).all():
+                    art.category_id = None
+                    session.add(art)
+                session.delete(cat)
+
+        # Re-create missing categories
+        for cat_data in snapshot["categories"]:
+            if not session.exec(select(Category).where(Category.name == cat_data["name"])).first():
+                session.add(Category(name=cat_data["name"]))
+        session.commit()
+
+        # Build a name->id lookup
+        cat_lookup = {
+            c.name: c.id for c in session.exec(select(Category)).all()
+        }
+
+        # --- 3. Restore Subscriptions ---
+        snapshot_sub_urls = {s["url"] for s in snapshot["subscriptions"]}
+        existing_subs = session.exec(select(Subscription)).all()
+
+        # Remove user-added subscriptions and their articles
+        for sub in existing_subs:
+            if sub.url not in snapshot_sub_urls:
+                # Delete cached articles that came from this subscription
+                for art in session.exec(
+                    select(CachedArticle).where(CachedArticle.feed_id == f"sub_{sub.id}")
+                ).all():
+                    session.delete(art)
+                session.delete(sub)
+
+        # Re-create missing or fix moved subscriptions
+        for sub_data in snapshot["subscriptions"]:
+            target_cat_id = cat_lookup.get(sub_data["category_name"]) if sub_data["category_name"] else None
+            existing = session.exec(select(Subscription).where(Subscription.url == sub_data["url"])).first()
+            if not existing:
+                session.add(Subscription(
+                    url=sub_data["url"],
+                    title=sub_data["title"],
+                    category_id=target_cat_id,
+                ))
+            else:
+                # Fix title and category if user moved it
+                existing.title = sub_data["title"]
+                existing.category_id = target_cat_id
+                session.add(existing)
+        session.commit()
+
+        # --- 4. Restore Collections and Feeds ---
+        snapshot_col_slugs = {c["slug"] for c in snapshot["collections"]}
+        existing_cols = session.exec(select(Collection)).all()
+
+        # Remove user-added collections (and their feeds, vectors, cached articles)
+        for col in existing_cols:
+            if col.slug not in snapshot_col_slugs:
+                for feed in col.feeds:
+                    session.delete(feed)
+                # Remove vectors for this collection
+                session.execute(
+                    text("DELETE FROM vec_articles WHERE rowid IN "
+                         "(SELECT id FROM articlevector WHERE collection_id = :cid)"),
+                    {"cid": col.id},
+                )
+                for av in session.exec(select(ArticleVector).where(ArticleVector.collection_id == col.id)).all():
+                    session.delete(av)
+                # Remove generated digest articles
+                for art in session.exec(
+                    select(CachedArticle).where(CachedArticle.feed_id == f"col_{col.id}")
+                ).all():
+                    session.delete(art)
+                # Remove XML file
+                xml_path = f"/app/data/feeds/{col.slug}.xml"
+                if os.path.exists(xml_path):
+                    os.remove(xml_path)
+                session.delete(col)
+        session.commit()
+
+        # Re-create or restore baseline collections
+        for col_data in snapshot["collections"]:
+            target_cat_id = cat_lookup.get(col_data["category_name"]) if col_data["category_name"] else None
+            existing_col = session.exec(
+                select(Collection).where(Collection.slug == col_data["slug"])
+            ).first()
+
+            if not existing_col:
+                existing_col = Collection(
+                    name=col_data["name"],
+                    slug=col_data["slug"],
+                )
+                session.add(existing_col)
+                session.commit()
+                session.refresh(existing_col)
+
+            # Restore all collection properties
+            existing_col.name = col_data["name"]
+            existing_col.schedule_time = col_data["schedule_time"]
+            existing_col.system_prompt = col_data["system_prompt"]
+            existing_col.context_length = col_data["context_length"]
+            existing_col.filter_max_articles = col_data["filter_max_articles"]
+            existing_col.filter_age = col_data["filter_age"]
+            existing_col.focus_keywords = col_data["focus_keywords"]
+            existing_col.max_articles_per_topic = col_data["max_articles_per_topic"]
+            existing_col.is_active = col_data["is_active"]
+            existing_col.rag_top_k = col_data["rag_top_k"]
+            existing_col.rag_min_similarity = col_data["rag_min_similarity"]
+            existing_col.rag_eviction_days = col_data["rag_eviction_days"]
+            existing_col.category_id = target_cat_id
+            session.add(existing_col)
+            session.commit()
+
+            # Restore feeds: remove extras, add missing
+            snapshot_feed_urls = set(col_data["feeds"])
+            current_feeds = session.exec(
+                select(Feed).where(Feed.collection_id == existing_col.id)
+            ).all()
+            for feed in current_feeds:
+                if feed.url not in snapshot_feed_urls:
+                    session.delete(feed)
+            current_feed_urls = {f.url for f in current_feeds}
+            for feed_url in snapshot_feed_urls:
+                if feed_url not in current_feed_urls:
+                    session.add(Feed(url=feed_url, collection_id=existing_col.id))
+            session.commit()
+
+        # --- 5. Clear read state so the demo feels fresh ---
+        session.execute(text("DELETE FROM readitem"))
+        session.commit()
+
+    logger.info("[Demo] Baseline restored successfully.")
+
+
 # Lazy-load the model so it doesn't slow down FastAPI startup
 _embedding_model = None
 
@@ -517,20 +993,31 @@ def get_embedding_model():
     return _embedding_model
 
 
-def cluster_articles(articles: List[dict], num_clusters: int = 5, max_per_topic: int = 5) -> List[List[dict]]:
-    """Groups articles and drops outliers by measuring distance to the semantic center."""
-    n_clusters = min(num_clusters, len(articles))
-    if n_clusters <= 1:
-        return [articles[:max_per_topic]]
-
-    logger.info(f"[Clustering] Embedding {len(articles)} articles for semantic analysis...")
+def cluster_articles(
+    articles: List[dict],
+    num_clusters: int = 5,
+    max_per_topic: int = 5,
+) -> tuple:
+    """Groups articles, drops outliers, and returns
+    (clusters_with_centers, embeddings) where clusters_with_centers is a list of
+    (cluster_articles, center_embedding) tuples and embeddings is the full numpy
+    array for all articles (used by the caller to store vectors after generation)."""
     model = get_embedding_model()
     texts_to_embed = [f"{a['title']}. {a['text']}" for a in articles]
+
+    n_clusters = min(num_clusters, len(articles))
+    if n_clusters <= 1:
+        logger.info(f"[Clustering] Embedding {len(articles)} articles for semantic analysis...")
+        embeddings = model.encode(texts_to_embed)
+        center = np.mean(embeddings, axis=0)
+        return [(articles[:max_per_topic], center)], embeddings
+
+    logger.info(f"[Clustering] Embedding {len(articles)} articles for semantic analysis...")
     embeddings = model.encode(texts_to_embed)
 
     logger.info(f"[Clustering] Grouping into {n_clusters} topics and filtering outliers...")
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
-    
+
     # Fit the model AND get the mathematical distances to the cluster centers
     kmeans.fit(embeddings)
     labels = kmeans.labels_
@@ -544,14 +1031,16 @@ def cluster_articles(articles: List[dict], num_clusters: int = 5, max_per_topic:
 
     final_clusters = []
     for c_id, items in clusters.items():
-        if not items: continue
+        if not items:
+            continue
         # Sort by distance (closest to the core topic first)
         items.sort(key=lambda x: x["dist"])
         # Slice off the outliers based on our max_per_topic setting
         sliced_articles = [x["article"] for x in items[:max_per_topic]]
-        final_clusters.append(sliced_articles)
+        center_embedding = kmeans.cluster_centers_[c_id]
+        final_clusters.append((sliced_articles, center_embedding))
 
-    return final_clusters
+    return final_clusters, embeddings
 
 
 
@@ -564,6 +1053,14 @@ def cluster_articles(articles: List[dict], num_clusters: int = 5, max_per_topic:
 async def lifespan(app: FastAPI):
     SQLModel.metadata.create_all(engine)
     upgrade_db_schema(engine)
+
+    with Session(engine) as session:
+        session.execute(text(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_articles "
+            "USING vec0(embedding float[384], collection_id integer)"
+        ))
+        session.commit()
+    logger.info("[RAG] vec_articles virtual table ready.")
     
     with Session(engine) as session:
         settings = get_settings(session)
@@ -581,11 +1078,6 @@ async def lifespan(app: FastAPI):
             
         if env_api_key and settings.api_key != env_api_key:
             settings.api_key = env_api_key
-            updated = True
-
-        env_apify_key = os.environ.get("APIFY_API_KEY")
-        if env_apify_key and settings.apify_api_key != env_apify_key:
-            settings.apify_api_key = env_apify_key
             updated = True
 
         if updated:
@@ -610,10 +1102,27 @@ async def lifespan(app: FastAPI):
         if not session.exec(select(Category).where(Category.name == "AI Digest")).first():
             session.add(Category(name="AI Digest"))
             session.commit()
+
+    # --- Demo Mode: import OPML and take snapshot on first boot ---
+    _demo_mode_boot = os.environ.get("DEMO_MODE", "false").lower() == "true"
+    if _demo_mode_boot:
+        if os.path.exists(DEMO_OPML_PATH):
+            with Session(engine) as session:
+                _import_opml_subscriptions(session)
+            logger.info("[Demo] OPML feeds imported from demo_feeds.opml.")
+        if not os.path.exists(DEMO_SNAPSHOT_PATH):
+            demo_take_snapshot()
+        else:
+            logger.info("[Demo] Snapshot already exists, running restore to clean up any leftover state...")
+            demo_restore_snapshot()
+
     scheduler = BackgroundScheduler()
     scheduler.add_job(scheduled_checker, 'interval', minutes=15)
     scheduler.add_job(sync_all_feeds, 'interval', minutes=15)
     scheduler.add_job(cleanup_old_articles, 'interval', hours=1)
+    scheduler.add_job(run_nightly_prune, 'cron', hour=3, minute=0)
+    if _demo_mode_boot:
+        scheduler.add_job(demo_restore_snapshot, 'cron', hour=4, minute=0)
     scheduler.start()
     
     from threading import Thread
@@ -624,8 +1133,115 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import RedirectResponse as StarletteRedirect
+
+DEMO_MODE = os.environ.get("DEMO_MODE", "false").lower() == "true"
+DEMO_USER = os.environ.get("DEMO_USER", "demo")
+DEMO_PASS = os.environ.get("DEMO_PASS", "demo")
+_DEMO_TOKEN = hashlib.sha256(f"{DEMO_USER}:{DEMO_PASS}".encode()).hexdigest()
+
+# --- CSRF Protection ---
+_CSRF_COOKIE = "csrf_token"
+_CSRF_HEADER = "X-CSRF-Token"
+_CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+def _generate_csrf_token() -> str:
+    return secrets.token_hex(32)
+
+def _csrf_token_matches(cookie_val: str, header_val: str) -> bool:
+    if not cookie_val or not header_val:
+        return False
+    return hmac.compare_digest(cookie_val, header_val)
+
+class CSRFMiddleware(BaseHTTPMiddleware):
+    HANDLER_VALIDATED = {"/login"}
+
+    async def dispatch(self, request, call_next):
+        if request.method not in _CSRF_SAFE_METHODS and request.url.path not in self.HANDLER_VALIDATED:
+            cookie_token = request.cookies.get(_CSRF_COOKIE)
+            header_token = request.headers.get(_CSRF_HEADER)
+            if not _csrf_token_matches(cookie_token, header_token):
+                if request.headers.get("HX-Request"):
+                    return HTMLResponse(
+                        '<span style="color:#ff4444;">Session expired. Please <a href="/" style="color:var(--primary);">reload the page</a>.</span>',
+                        status_code=403,
+                    )
+                return Response("CSRF validation failed", status_code=403)
+
+        response = await call_next(request)
+
+        if not request.cookies.get(_CSRF_COOKIE):
+            response.set_cookie(
+                _CSRF_COOKIE,
+                _generate_csrf_token(),
+                httponly=False,
+                secure=True,
+                samesite="lax",
+                max_age=86400,
+                path="/",
+            )
+
+        return response
+
+class DemoAuthMiddleware(BaseHTTPMiddleware):
+    OPEN_PREFIXES = ("/login", "/static/", "/feeds/", "/manifest.json", "/sw.js")
+
+    async def dispatch(self, request, call_next):
+        if not DEMO_MODE:
+            return await call_next(request)
+        path = request.url.path
+        if any(path.startswith(p) for p in self.OPEN_PREFIXES):
+            return await call_next(request)
+        if request.cookies.get("demo_token") == _DEMO_TOKEN:
+            return await call_next(request)
+        return StarletteRedirect("/login", status_code=303)
+
+app.add_middleware(CSRFMiddleware)
+app.add_middleware(DemoAuthMiddleware)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ==========================================
+#               DEMO AUTH ROUTES
+# ==========================================
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    if not DEMO_MODE:
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse("login.html", {
+        "request": request,
+        "demo_user": DEMO_USER,
+        "demo_pass": DEMO_PASS,
+        "error": None,
+    })
+
+@app.post("/login")
+async def login_submit(request: Request):
+    form = await request.form()
+    # CSRF validation (exempt from middleware, validated here via form field)
+    cookie_token = request.cookies.get(_CSRF_COOKIE, "")
+    form_token = form.get("csrf_token", "")
+    if not _csrf_token_matches(cookie_token, form_token):
+        return templates.TemplateResponse("login.html", {
+            "request": request,
+            "demo_user": DEMO_USER,
+            "demo_pass": DEMO_PASS,
+            "error": "Invalid request. Please reload and try again.",
+        }, status_code=403)
+    username = form.get("username", "")
+    password = form.get("password", "")
+    if username == DEMO_USER and password == DEMO_PASS:
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie("demo_token", _DEMO_TOKEN, httponly=True, secure=True, samesite="lax", max_age=86400)
+        return response
+    return templates.TemplateResponse("login.html", {
+        "request": request,
+        "demo_user": DEMO_USER,
+        "demo_pass": DEMO_PASS,
+        "error": "Invalid credentials.",
+    })
 
 # ==========================================
 #               READER ROUTES
@@ -767,160 +1383,6 @@ def extract_real_url(raw_url: str, base_url: str) -> str:
     return cleaned
 
 
-def _is_instagram_url(url: str) -> bool:
-    return bool(re.search(r'instagram\.com', url, re.IGNORECASE))
-
-
-def scrape_article_html_apify(url: str, apify_api_key: str) -> str:
-    """
-    Scrape an article or Instagram post via Apify and return sanitized HTML.
-    - Instagram URLs: uses apify/instagram-scraper actor to fetch post data
-    - All other URLs: uses apify/article-extractor-smart actor
-    """
-    if not apify_api_key:
-        raise RuntimeError("Apify API key not configured. Set it in Settings or via APIFY_API_KEY env var.")
-
-    apify_base = "https://api.apify.com/v2"
-
-    if _is_instagram_url(url):
-        # --- Instagram scraper ---
-        actor_id = "apify~instagram-scraper"
-        run_input = {
-            "directUrls": [url],
-            "resultsType": "posts",
-            "resultsLimit": 1,
-        }
-        run_resp = requests.post(
-            f"{apify_base}/acts/{actor_id}/run-sync-get-dataset-items",
-            params={"token": apify_api_key, "timeout": 60, "memory": 256},
-            json=run_input,
-            timeout=90,
-        )
-        run_resp.raise_for_status()
-        items = run_resp.json()
-        if not items:
-            raise RuntimeError("Apify Instagram scraper returned no results for this URL.")
-
-        post = items[0]
-        caption = post.get("caption") or post.get("alt") or ""
-        owner = post.get("ownerUsername") or post.get("ownerId") or ""
-        timestamp = post.get("timestamp") or post.get("taken_at_timestamp") or ""
-        images: list = []
-
-        def _clean_apify_url(u) -> str:
-            """Strip stray quote chars Apify sometimes includes in URL strings."""
-            if not isinstance(u, str):
-                return ""
-            return u.strip().strip('"').strip("'").strip()
-
-        # Collect images/video thumbnails
-        raw_display = _clean_apify_url(post.get("displayUrl"))
-        if raw_display:
-            images.append(raw_display)
-        for sidecar in (post.get("childPosts") or post.get("sidecarImages") or []):
-            img_url = _clean_apify_url(sidecar.get("displayUrl") or sidecar.get("url"))
-            if img_url:
-                images.append(img_url)
-
-        # Build HTML
-        parts = []
-        if owner:
-            parts.append(f'<p style="color:#888; font-size:0.9rem; margin-bottom:0.5rem;">@{html.escape(owner)}</p>')
-        if timestamp:
-            parts.append(f'<p style="color:#666; font-size:0.85rem; margin-bottom:1rem;">{html.escape(str(timestamp))}</p>')
-        for img_url in images:
-            if img_url.startswith(("http://", "https://")):
-                # Instagram CDN images are signed with session cookies — render directly,
-                # do NOT proxy them through the server (proxy would get 403 from Instagram).
-                parts.append(
-                    f'<img src="{html.escape(img_url)}" loading="lazy" crossorigin="anonymous" '
-                    f'style="max-width:100%;height:auto;border-radius:8px;margin:1rem auto;display:block;box-shadow:0 4px 12px rgba(0,0,0,0.3);" '
-                    f'onerror="this.style.display=\'none\'" alt="Instagram post image"/>'
-                )
-        if caption:
-            escaped = html.escape(caption).replace("\n", "<br>")
-            parts.append(f'<p style="margin-top:1.5rem;line-height:1.7;">{escaped}</p>')
-
-        return "\n".join(parts) if parts else "<p>No content found in this Instagram post.</p>"
-
-    else:
-        # --- General article extractor ---
-        # Uses lukaskrivka/article-extractor-smart — a well-known community actor
-        actor_id = "lukaskrivka~article-extractor-smart"
-        run_input = {"startUrls": [{"url": url}], "proxyConfiguration": {"useApifyProxy": True}}
-        run_resp = requests.post(
-            f"{apify_base}/acts/{actor_id}/run-sync-get-dataset-items",
-            params={"token": apify_api_key, "timeout": 60, "memory": 256},
-            json=run_input,
-            timeout=90,
-        )
-        run_resp.raise_for_status()
-        items = run_resp.json()
-        if not items:
-            raise RuntimeError("Apify article extractor returned no results for this URL.")
-
-        article = items[0]
-        # Actor returns: text (plain), loadedContent/content (HTML), topImage/image
-        raw_html = (article.get("loadedContent") or article.get("content")
-                    or article.get("text") or "")
-        if not raw_html:
-            raise RuntimeError("Apify article extractor could not extract content from this page.")
-
-        # Lead image — check multiple field names the actor may use
-        header_image_html = ""
-        lead_image = (article.get("topImage") or article.get("image")
-                      or article.get("featuredImage") or "")
-        if lead_image and isinstance(lead_image, str) and lead_image.startswith(("http://", "https://")):
-            proxied_lead = "/reader/image_proxy?url=" + quote(lead_image, safe="")
-            header_image_html = (
-                f'<img src="{proxied_lead}" '
-                f'style="max-width:100%;height:auto;border-radius:8px;'
-                f'margin-bottom:1.5rem;display:block;box-shadow:0 4px 12px rgba(0,0,0,0.3);" '
-                f'onerror="this.style.display=\'none\'" alt="Header Image"/>\n'
-            )
-
-        # If text is plain or markdown-ish, wrap in a <p>
-        if not raw_html.strip().startswith("<"):
-            raw_html = "<p>" + raw_html.replace("\n\n", "</p><p>").replace("\n", "<br>") + "</p>"
-
-        soup = BeautifulSoup(raw_html, 'html.parser')
-        for tag in soup.find_all(['script', 'style', 'iframe', 'noscript']):
-            tag.decompose()
-        for picture in soup.find_all('picture'):
-            img = picture.find('img')
-            if img:
-                picture.replace_with(img)
-            else:
-                picture.decompose()
-        for source in soup.find_all('source'):
-            source.decompose()
-        for a in soup.find_all('a'):
-            href = extract_real_url(a.get('href'), url)
-            if href:
-                a['href'] = href
-            a['target'] = '_blank'
-            a['style'] = 'color:#1095c1;text-decoration:none;'
-        for img in soup.find_all('img'):
-            src = extract_real_url(img.get('src'), url)
-            if src and src.startswith(("http://", "https://")):
-                img['src'] = "/reader/image_proxy?url=" + quote(src, safe="")
-            elif src and src.startswith("data:"):
-                img['src'] = src
-            else:
-                img.decompose()
-                continue
-            img['loading'] = 'lazy'
-            img['style'] = (
-                'max-width:100%;height:auto;border-radius:8px;'
-                'margin:1.5rem auto;display:block;box-shadow:0 4px 12px rgba(0,0,0,0.3);'
-            )
-            img['onerror'] = "this.style.display='none'"
-            for attr in ['class', 'width', 'height', 'srcset', 'sizes', 'referrerpolicy']:
-                if attr in img.attrs:
-                    del img[attr]
-
-        return header_image_html + str(soup)
-
 
 def scrape_article_html(url: str) -> str:
     """
@@ -1019,10 +1481,6 @@ def truncate_text(text: str, limit: int) -> str:
 @app.post("/reader/fetch_content")
 def fetch_content(url: str = Form(...)):
     try:
-        with Session(engine) as session:
-            settings = get_settings(session)
-        if settings.scraper_backend == "apify":
-            return scrape_article_html_apify(url, settings.apify_api_key or "")
         return scrape_article_html(url)
     except Exception as e:
         import traceback
@@ -1566,31 +2024,37 @@ def force_sync_all(background_tasks: BackgroundTasks):
 def read_settings(request: Request):
     with Session(engine) as session:
         settings = get_settings(session)
-        return templates.TemplateResponse("settings.html", {"request": request, "settings": settings})
+        return templates.TemplateResponse("settings.html", {
+            "request": request,
+            "settings": settings,
+            "demo_mode": DEMO_MODE,
+            "api_key_is_set": bool(settings.api_key),
+        })
 
 @app.post("/settings/update")
 async def update_global_settings(request: Request):
     """Bulletproof save endpoint using safe FormData extraction."""
     form = await request.form()
-    
     with Session(engine) as session:
         settings = get_settings(session)
-        
+
         settings.api_type = "openai"
-        
-        # Safely extract and apply strings
-        if form.get("api_endpoint") is not None: settings.api_endpoint = form.get("api_endpoint")
-        if form.get("api_key") is not None: settings.api_key = form.get("api_key")
-        if form.get("model_name") is not None: settings.model_name = clean_model_id(form.get("model_name"))
+
+        # In demo mode, skip AI provider fields entirely
+        if not DEMO_MODE:
+            if form.get("api_endpoint") is not None: settings.api_endpoint = form.get("api_endpoint")
+            if form.get("api_key"): settings.api_key = form.get("api_key")
+            if form.get("model_name") is not None: settings.model_name = clean_model_id(form.get("model_name"))
         if form.get("default_schedule") is not None: settings.default_schedule = form.get("default_schedule")
         if form.get("default_filter_age") is not None: settings.default_filter_age = form.get("default_filter_age")
         if form.get("default_system_prompt") is not None: settings.default_system_prompt = form.get("default_system_prompt")
-        if form.get("reader_font_family") is not None: settings.reader_font_family = form.get("reader_font_family")
-        if form.get("reader_font_size") is not None: settings.reader_font_size = form.get("reader_font_size")
-        if form.get("reader_line_height") is not None: settings.reader_line_height = form.get("reader_line_height")
+        if form.get("reader_font_family") is not None:
+            settings.reader_font_family = _sanitize_css_value(form.get("reader_font_family"))
+        if form.get("reader_font_size") is not None:
+            settings.reader_font_size = _sanitize_css_value(form.get("reader_font_size"))
+        if form.get("reader_line_height") is not None:
+            settings.reader_line_height = _sanitize_css_value(form.get("reader_line_height"))
         if form.get("default_focus_keywords") is not None: settings.default_focus_keywords = form.get("default_focus_keywords")
-        if form.get("scraper_backend") is not None: settings.scraper_backend = form.get("scraper_backend")
-        if form.get("apify_api_key") is not None: settings.apify_api_key = form.get("apify_api_key")
         
         # Safely extract and apply integers
         try:
@@ -1612,8 +2076,10 @@ async def update_global_settings(request: Request):
 @app.post("/settings/test_llm")
 async def test_llm_connection(request: Request):
     """Tests the LLM connection using the currently typed inputs, even if unsaved."""
+    if DEMO_MODE:
+        return HTMLResponse("<span style='color: #ff4444; font-weight: bold;'>❌ Connection testing is disabled in demo mode.</span>")
     form = await request.form()
-    
+
     with Session(engine) as session:
         # Load base settings, but override them with whatever is typed in the form right now
         settings = get_settings(session)
@@ -1635,16 +2101,20 @@ async def test_llm_connection(request: Request):
 @app.get("/settings/backup")
 def backup_database():
     """Downloads the raw SQLite database file."""
+    if DEMO_MODE:
+        raise HTTPException(status_code=403, detail="Backups are disabled in demo mode.")
     timestamp = int(time.time())
     return FileResponse(
-        DB_FILE, 
-        media_type="application/octet-stream", 
+        DB_FILE,
+        media_type="application/octet-stream",
         filename=f"feedfactory_backup_{timestamp}.db"
     )
 
 @app.post("/settings/restore")
 async def restore_database(file: UploadFile = File(...)):
     """Overwrites the current database with an uploaded backup."""
+    if DEMO_MODE:
+        raise HTTPException(status_code=403, detail="Database restore is disabled in demo mode.")
     content = await file.read()
     with open(DB_FILE, "wb") as f:
         f.write(content)
@@ -1666,6 +2136,9 @@ def manage_collections(request: Request):
 
 @app.post("/collections/add")
 def add_collection(name: str = Form(...), slug: str = Form(...), category_id: str = Form("none")):
+    slug = _sanitize_slug(slug)
+    if not slug:
+        return Response(content="Error: Invalid slug", status_code=400)
     with Session(engine) as session:
         if session.exec(select(Collection).where(Collection.slug == slug)).first(): return Response(content="Error: Slug exists", status_code=400)
         g = get_settings(session)
@@ -1687,6 +2160,9 @@ def add_collection(name: str = Form(...), slug: str = Form(...), category_id: st
 
 @app.post("/collections/{cid}/update")
 def update_collection(cid: int, name: str = Form(...), slug: str = Form(...), category_id: str = Form("none")):
+    slug = _sanitize_slug(slug)
+    if not slug:
+        return Response("Error: Invalid slug", status_code=400)
     with Session(engine) as session:
         col = session.get(Collection, cid)
         if not col: return Response("Not found", 404)
@@ -1710,15 +2186,32 @@ def delete_collection(cid: int):
     return Response(headers={"HX-Refresh": "true"})
 
 @app.post("/collections/{cid}/update_settings")
-def update_settings(cid: int, schedule_time: str = Form(...), context_length: int = Form(...), filter_max_articles: int = Form(...),max_articles_per_topic: int = Form(...), filter_age: str = Form(...), focus_keywords: str = Form("")):
+def update_settings(
+    cid: int,
+    schedule_time: str = Form(...),
+    context_length: int = Form(...),
+    filter_max_articles: int = Form(...),
+    max_articles_per_topic: int = Form(...),
+    filter_age: str = Form(...),
+    focus_keywords: str = Form(""),
+    rag_top_k: int = Form(3),
+    rag_min_similarity: float = Form(0.60),
+    rag_eviction_days: int = Form(14),
+):
     with Session(engine) as session:
         col = session.get(Collection, cid)
-        if col: 
-            col.schedule_time = schedule_time; col.context_length = context_length; 
-            col.filter_max_articles = filter_max_articles; col.filter_age = filter_age; 
-            col.max_articles_per_topic = max_articles_per_topic;
-            col.focus_keywords = focus_keywords # NEW
-            session.add(col); session.commit()
+        if col:
+            col.schedule_time = schedule_time
+            col.context_length = context_length
+            col.filter_max_articles = filter_max_articles
+            col.filter_age = filter_age
+            col.max_articles_per_topic = max_articles_per_topic
+            col.focus_keywords = focus_keywords
+            col.rag_top_k = rag_top_k
+            col.rag_min_similarity = rag_min_similarity
+            col.rag_eviction_days = rag_eviction_days
+            session.add(col)
+            session.commit()
     return "Saved"
 
 
@@ -1821,6 +2314,9 @@ async def import_opml(cid: int, file: UploadFile = File(...)):
 
 @app.get("/feeds/{slug}.xml")
 def get_feed_xml(slug: str):
+    slug = _sanitize_slug(slug)
+    if not slug:
+        raise HTTPException(status_code=400, detail="Invalid slug")
     path = f"/app/data/feeds/{slug}.xml"
     if not os.path.exists(path): return Response(content="<rss><channel><title>Generating...</title></channel></rss>", media_type="application/xml")
     with open(path, "r") as f: return Response(content=f.read(), media_type="application/xml")
@@ -1848,8 +2344,7 @@ def get_manifest():
 def get_sw():
     js = """
     const CACHE_NAME = 'feedfactory-pwa-v2';
-    
-    // The core files needed to launch the app UI offline
+
     const APP_SHELL = [
         '/',
         '/reader/categories',
@@ -1857,57 +2352,69 @@ def get_sw():
         '/manifest.json'
     ];
 
+    // Rejects after `ms` milliseconds — used to race against stalled fetches
+    function networkTimeout(ms) {
+        return new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('network-timeout')), ms)
+        );
+    }
+
+    // Tell all open client windows that we just served from cache
+    async function notifyClientsOffline() {
+        const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: false });
+        allClients.forEach(client => client.postMessage({ type: 'SW_SERVING_FROM_CACHE' }));
+    }
+
     self.addEventListener('install', event => {
-        self.skipWaiting(); // Force the new service worker to activate immediately
+        self.skipWaiting();
         event.waitUntil(
             caches.open(CACHE_NAME).then(cache => {
-                console.log('[Service Worker] Pre-caching App Shell');
+                console.log('[SW] Pre-caching App Shell');
                 return cache.addAll(APP_SHELL);
             })
         );
     });
 
-    // Clean up old v1 caches so they don't take up space
     self.addEventListener('activate', event => {
         event.waitUntil(
-            caches.keys().then(cacheNames => {
-                return Promise.all(
-                    cacheNames.map(cacheName => {
-                        if (cacheName !== CACHE_NAME) {
-                            console.log('[Service Worker] Clearing old cache:', cacheName);
-                            return caches.delete(cacheName);
-                        }
-                    })
-                );
-            }).then(() => self.clients.claim())
+            caches.keys().then(cacheNames => Promise.all(
+                cacheNames.map(cacheName => {
+                    if (cacheName !== CACHE_NAME) {
+                        console.log('[SW] Removing old cache:', cacheName);
+                        return caches.delete(cacheName);
+                    }
+                })
+            )).then(() => self.clients.claim())
         );
     });
 
     self.addEventListener('fetch', event => {
         if (event.request.method !== 'GET') return;
-        
+
         event.respondWith(
-            fetch(event.request)
-                .then(response => {
-                    const resClone = response.clone();
-                    caches.open(CACHE_NAME).then(cache => {
-                        cache.put(event.request, resClone);
-                    });
-                    return response;
-                })
-                .catch(async () => {
-                    // 1. Try to find the exact request in the cache
-                    const cachedResponse = await caches.match(event.request);
-                    if (cachedResponse) {
-                        return cachedResponse;
-                    }
-                    
-                    // 2. Fallback: If it's a browser navigation request (like opening the app)
-                    // and we couldn't find it, forcefully serve the cached root App Shell.
-                    if (event.request.mode === 'navigate') {
-                        return caches.match('/');
-                    }
-                })
+            Promise.race([
+                fetch(event.request),
+                networkTimeout(3500)
+            ])
+            .then(response => {
+                // Network won — refresh the cache entry and return the live response
+                const resClone = response.clone();
+                caches.open(CACHE_NAME).then(cache => cache.put(event.request, resClone));
+                return response;
+            })
+            .catch(async () => {
+                // Network lost (hard error) or timed out (strained connection)
+                const cachedResponse = await caches.match(event.request);
+                if (cachedResponse) {
+                    notifyClientsOffline();
+                    return cachedResponse;
+                }
+                // Nothing in cache — for navigation requests serve the app shell root
+                if (event.request.mode === 'navigate') {
+                    notifyClientsOffline();
+                    return caches.match('/');
+                }
+            })
         );
     });
     """

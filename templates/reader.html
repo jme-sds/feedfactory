@@ -438,7 +438,7 @@
 
             const formData = new FormData();
             formData.append('url', currentArticleLink);
-            fetch('/reader/mark_read', { method: 'POST', body: formData });
+            fetch('/reader/mark_read', { method: 'POST', body: formData, headers: { 'X-CSRF-Token': getCsrfToken() } });
 
             isArticleRead = true;
             updateReadBadgeUI();
@@ -498,7 +498,7 @@
                     formData.append('url', currentArticleLink);
 
                     try {
-                        const response = await fetch('/reader/fetch_content', { method: 'POST', body: formData });
+                        const response = await fetch('/reader/fetch_content', { method: 'POST', body: formData, headers: { 'X-CSRF-Token': getCsrfToken() } });
                         const html = await response.text();
                         fetchedArticleHTML = html;
                         bodyEl.innerHTML = fetchedArticleHTML;
@@ -539,7 +539,7 @@
             formData.append('text', articleText);
 
             try {
-                const response = await fetch('/reader/summarize_article', { method: 'POST', body: formData });
+                const response = await fetch('/reader/summarize_article', { method: 'POST', body: formData, headers: { 'X-CSRF-Token': getCsrfToken() } });
                 if (!response.ok) throw new Error("Failed to reach server.");
                 const html = await response.text();
                 summaryContent.innerHTML = html;
