@@ -1,0 +1,170 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   THEME CSS VARIABLES  (RGB channels — required for Tailwind
+   opacity utilities like bg-primary/10 to work correctly)
+   ============================================================ */
+
+:root,
+[data-theme="default"] {
+  --background:    20  20  20;   /* #141414 */
+  --surface:       30  30  30;   /* #1e1e1e */
+  --border:        51  51  51;   /* #333 */
+  --primary:       16 149 193;   /* #1095c1 */
+  --primary-hover: 13 126 163;   /* #0d7ea3 */
+  --muted:        136 136 136;   /* #888 */
+  --fg:           255 255 255;   /* white text */
+}
+
+[data-theme="dark"] {
+  --background:    17  17  17;   /* #111 */
+  --surface:       28  28  28;   /* #1c1c1c */
+  --border:        42  42  42;   /* #2a2a2a */
+  --primary:       16 149 193;
+  --primary-hover: 13 126 163;
+  --muted:        119 119 119;   /* #777 */
+  --fg:           224 224 224;   /* #e0e0e0 */
+}
+
+[data-theme="light"] {
+  --background:   240 246 252;   /* #f0f6fc */
+  --surface:      255 255 255;   /* #fff */
+  --border:       208 228 239;   /* #d0e4ef */
+  --primary:       13 126 168;   /* #0d7ea8 */
+  --primary-hover: 10 102 136;   /* #0a6688 */
+  --muted:         90 112 128;   /* #5a7080 */
+  --fg:            26  26  26;   /* #1a1a1a */
+}
+
+[data-theme="sepia"] {
+  --background:   244 236 216;   /* #f4ecd8 */
+  --surface:      237 227 200;   /* #ede3c8 */
+  --border:       200 176 144;   /* #c8b090 */
+  --primary:      154  94  42;   /* #9a5e2a */
+  --primary-hover: 122  74  32;  /* #7a4a20 */
+  --muted:        122  96  64;   /* #7a6040 */
+  --fg:            44  26   6;   /* #2c1a06 */
+}
+
+/* ============================================================
+   BASE STYLES
+   ============================================================ */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  background: rgb(var(--background));
+  color: rgb(var(--fg));
+  font-family: system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgb(var(--surface));
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--border));
+  border-radius: 3px;
+}
+
+/* ============================================================
+   LIGHT / SEPIA THEME OVERRIDES
+   Hover patterns written for dark themes (text-white, bg-white/5)
+   become invisible on light backgrounds — override them here.
+   ============================================================ */
+
+[data-theme="light"] .hover\:text-white:hover,
+[data-theme="sepia"] .hover\:text-white:hover {
+  color: rgb(var(--fg));
+}
+
+[data-theme="light"] .hover\:bg-white\/5:hover,
+[data-theme="sepia"] .hover\:bg-white\/5:hover {
+  background-color: rgb(0 0 0 / 0.06);
+}
+
+/* ============================================================
+   READER ARTICLE CONTENT
+   ============================================================ */
+
+.reader-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 1rem auto;
+  display: block;
+}
+
+.reader-content a {
+  color: rgb(var(--primary));
+  text-decoration: none;
+}
+
+.reader-content a:hover {
+  text-decoration: underline;
+}
+
+.reader-content p {
+  margin-bottom: 1em;
+}
+
+.reader-content h1,
+.reader-content h2,
+.reader-content h3 {
+  margin: 1.5em 0 0.5em;
+  color: rgb(var(--fg));
+}
+
+/* ============================================================
+   TILE GRID
+   ============================================================ */
+
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  padding: 12px;
+}
+
+/* ============================================================
+   LOADING SPINNER
+   ============================================================ */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgb(var(--border));
+  border-top-color: rgb(var(--primary));
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+/* ============================================================
+   ARTICLE STATE
+   ============================================================ */
+
+.article-read {
+  opacity: 0.45;
+}
+
+.article-selected {
+  outline: 2px solid rgb(var(--primary));
+  border-radius: 8px;
+}

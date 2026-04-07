@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Request, Form, Depends, HTTPException, UploadFile, File, Header, BackgroundTasks
+from fastapi import FastAPI, Request, Form, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, SQLModel, create_engine, select, or_, and_, Field, Relationship
 from sqlalchemy import inspect, text
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from typing import Optional, List
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
-from gradio_client import Client
 import feedparser
 import datetime
 import time
@@ -20,6 +19,7 @@ import io
 import requests
 import re
 import concurrent.futures
+import threading
 import html
 import json
 import hmac
@@ -59,7 +59,9 @@ def load_sqlite_vec(dbapi_conn, connection_record):
     sqlite_vec.load(dbapi_conn)
     dbapi_conn.enable_load_extension(False)
 
-templates = Jinja2Templates(directory="templates")
+# --- Batch scrape tracking ---
+_active_batch_scrapes: set = set()
+_batch_scrape_lock = threading.Lock()
 
 # --- Models ---
 class GlobalSettings(SQLModel, table=True):
@@ -81,6 +83,7 @@ class GlobalSettings(SQLModel, table=True):
     # --- NEW: PWA Offline Limit ---
     pwa_offline_limit: int = Field(default=200)
     default_focus_keywords: str = Field(default="")
+    ui_theme: str = Field(default="default")
 
 class Category(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -129,6 +132,7 @@ class Subscription(SQLModel, table=True):
     title: Optional[str] = None
     category_id: Optional[int] = Field(default=None, foreign_key="category.id")
     added_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
+    auto_scrape: bool = Field(default=False)
 
 class ReadItem(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -148,6 +152,7 @@ class CachedArticle(SQLModel, table=True):
     is_generated: bool
     category_id: Optional[int] = Field(default=None, foreign_key="category.id")
     added_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
+    scraped_content: Optional[str] = Field(default=None)
 
 # --- Helpers ---
 def clean_model_id(raw_id: str) -> str:
@@ -208,6 +213,7 @@ def sync_all_feeds():
                 except Exception as e: logger.error(f"Sync error (Collection {col.name}): {e}")
 
         subs = session.exec(select(Subscription)).all()
+        links_to_scrape = []  # (link, sub_id) for auto_scrape subs
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_sub = {executor.submit(fetch_external_feed, sub.url): sub for sub in subs}
             for future in concurrent.futures.as_completed(future_to_sub):
@@ -224,8 +230,28 @@ def sync_all_feeds():
                                     published=parse_date(entry), source_title=title, source_color="#4CAF50",
                                     is_generated=False, category_id=sub.category_id
                                 ))
+                                if sub.auto_scrape and entry.link:
+                                    links_to_scrape.append(entry.link)
                 except Exception as e: logger.error(f"Sync error (Sub {sub.url}): {e}")
         session.commit()
+
+        # Auto-scrape new articles for subscriptions with auto_scrape enabled
+        if links_to_scrape:
+            logger.info(f"[Auto-Scrape] Scraping {len(links_to_scrape)} new articles in background...")
+            def _scrape_and_cache(link):
+                try:
+                    html = scrape_article_html(link)
+                    with Session(engine) as s:
+                        art = s.exec(select(CachedArticle).where(CachedArticle.link == link)).first()
+                        if art and not art.scraped_content:
+                            art.scraped_content = html
+                            s.add(art)
+                            s.commit()
+                except Exception as e:
+                    logger.warning(f"[Auto-Scrape] Failed {link}: {e}")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as scrape_pool:
+                scrape_pool.map(_scrape_and_cache, links_to_scrape)
+
     logger.info("Feed sync complete.")
 
 def cleanup_old_articles():
@@ -288,12 +314,6 @@ def call_llm(settings: GlobalSettings, user_message: str, system_prompt: str) ->
         raise e
 
 
-
-def render_feed_rows(collection_id: int, feeds: list[Feed]):
-    html_parts = []
-    for feed in feeds:
-        html_parts.append(f'<div class="feed-row"><span class="feed-url" title="{feed.url}">{feed.url}</span><button class="icon-btn danger" hx-delete="/feeds/{feed.id}" hx-confirm="Remove feed?" hx-target="#feed-list-{collection_id}"><svg class="icon"><use href="#icon-trash"/></svg></button></div>')
-    return "\n".join(html_parts)
 
 def save_rss_file(collection, content_html):
     os.makedirs("/app/data/feeds", exist_ok=True)
@@ -372,19 +392,32 @@ def generate_digest_for_collection(collection_id: int):
 
                                 if not include_entry: continue
 
-                                # --- NEW: Postlight Auto-Scrape ---
+                                # --- Postlight Auto-Scrape (cache-first) ---
                                 text_content = entry.get('summary', '') or entry.get('description', '') or ''
-                                
+
                                 if feed.auto_scrape and entry.link:
                                     try:
-                                        logger.info(f"[Auto-Scrape] Fetching full content for: {entry.title}")
-                                        parser_url = f"http://parser:3000/parser?url={entry.link}"
-                                        resp = requests.get(parser_url, timeout=10)
-                                        if resp.ok:
-                                            p_data = resp.json()
-                                            if p_data.get('content'):
-                                                # Overwrite the weak summary with the full article text!
-                                                text_content = p_data['content']
+                                        # Check for cached scraped content first
+                                        with Session(engine) as scrape_session:
+                                            cached_art = scrape_session.exec(
+                                                select(CachedArticle).where(CachedArticle.link == entry.link)
+                                            ).first()
+                                        if cached_art and cached_art.scraped_content:
+                                            logger.info(f"[Auto-Scrape] Using cached content for: {entry.title}")
+                                            text_content = cached_art.scraped_content
+                                        else:
+                                            logger.info(f"[Auto-Scrape] Fetching full content for: {entry.title}")
+                                            scraped_html = scrape_article_html(entry.link)
+                                            text_content = scraped_html
+                                            # Save to cache if article exists in DB
+                                            with Session(engine) as scrape_session:
+                                                art = scrape_session.exec(
+                                                    select(CachedArticle).where(CachedArticle.link == entry.link)
+                                                ).first()
+                                                if art and not art.scraped_content:
+                                                    art.scraped_content = scraped_html
+                                                    scrape_session.add(art)
+                                                    scrape_session.commit()
                                     except Exception as e:
                                         logger.warning(f"[Auto-Scrape] Failed to scrape {entry.link}, falling back to summary.")
 
@@ -1137,6 +1170,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import RedirectResponse as StarletteRedirect
 
 DEMO_MODE = os.environ.get("DEMO_MODE", "false").lower() == "true"
+DEV_MODE = os.environ.get("DEV_MODE", "false").lower() == "true"
 DEMO_USER = os.environ.get("DEMO_USER", "demo")
 DEMO_PASS = os.environ.get("DEMO_PASS", "demo")
 _DEMO_TOKEN = hashlib.sha256(f"{DEMO_USER}:{DEMO_PASS}".encode()).hexdigest()
@@ -1162,6 +1196,8 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             cookie_token = request.cookies.get(_CSRF_COOKIE)
             header_token = request.headers.get(_CSRF_HEADER)
             if not _csrf_token_matches(cookie_token, header_token):
+                if request.url.path.startswith("/api/"):
+                    return Response(content='{"detail":"CSRF validation failed"}', status_code=403, media_type="application/json")
                 if request.headers.get("HX-Request"):
                     return HTMLResponse(
                         '<span style="color:#ff4444;">Session expired. Please <a href="/" style="color:var(--primary);">reload the page</a>.</span>',
@@ -1176,7 +1212,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 _CSRF_COOKIE,
                 _generate_csrf_token(),
                 httponly=False,
-                secure=True,
+                secure=not DEV_MODE,
                 samesite="lax",
                 max_age=86400,
                 path="/",
@@ -1185,7 +1221,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         return response
 
 class DemoAuthMiddleware(BaseHTTPMiddleware):
-    OPEN_PREFIXES = ("/login", "/static/", "/feeds/", "/manifest.json", "/sw.js")
+    OPEN_PREFIXES = ("/login", "/static/", "/feeds/", "/manifest.json", "/sw.js", "/api/auth/")
 
     async def dispatch(self, request, call_next):
         if not DEMO_MODE:
@@ -1195,165 +1231,26 @@ class DemoAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if request.cookies.get("demo_token") == _DEMO_TOKEN:
             return await call_next(request)
+        # Return 401 JSON for API requests so Next.js can handle auth
+        if path.startswith("/api/"):
+            return Response(content='{"detail":"Unauthorized"}', status_code=401, media_type="application/json")
         return StarletteRedirect("/login", status_code=303)
 
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(DemoAuthMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://frontend:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ==========================================
-#               DEMO AUTH ROUTES
-# ==========================================
-
-@app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    if not DEMO_MODE:
-        return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse("login.html", {
-        "request": request,
-        "demo_user": DEMO_USER,
-        "demo_pass": DEMO_PASS,
-        "error": None,
-    })
-
-@app.post("/login")
-async def login_submit(request: Request):
-    form = await request.form()
-    # CSRF validation (exempt from middleware, validated here via form field)
-    cookie_token = request.cookies.get(_CSRF_COOKIE, "")
-    form_token = form.get("csrf_token", "")
-    if not _csrf_token_matches(cookie_token, form_token):
-        return templates.TemplateResponse("login.html", {
-            "request": request,
-            "demo_user": DEMO_USER,
-            "demo_pass": DEMO_PASS,
-            "error": "Invalid request. Please reload and try again.",
-        }, status_code=403)
-    username = form.get("username", "")
-    password = form.get("password", "")
-    if username == DEMO_USER and password == DEMO_PASS:
-        response = RedirectResponse("/", status_code=303)
-        response.set_cookie("demo_token", _DEMO_TOKEN, httponly=True, secure=True, samesite="lax", max_age=86400)
-        return response
-    return templates.TemplateResponse("login.html", {
-        "request": request,
-        "demo_user": DEMO_USER,
-        "demo_pass": DEMO_PASS,
-        "error": "Invalid credentials.",
-    })
-
-# ==========================================
 #               READER ROUTES
 # ==========================================
-
-@app.post("/feeds/{feed_id}/toggle_scrape")
-def toggle_scrape(feed_id: int):
-    with Session(engine) as session:
-        feed = session.get(Feed, feed_id)
-        if feed:
-            feed.auto_scrape = not feed.auto_scrape
-            session.add(feed)
-            session.commit()
-    return "Toggled"
-
-
-
-
-@app.get("/", response_class=HTMLResponse)
-def read_home(request: Request):
-    with Session(engine) as session:
-        categories = session.exec(select(Category)).all()
-        settings = get_settings(session)
-        collections = session.exec(select(Collection)).all()
-        return templates.TemplateResponse("reader.html", {"request": request, "categories": categories, "settings": settings, "collections": collections})
-
-@app.get("/reader/categories", response_class=HTMLResponse)
-def get_categories(request: Request):
-    with Session(engine) as session:
-        # Guarantee categories are alphabetized initially
-        categories = session.exec(select(Category).order_by(Category.name)).all()
-        
-        unread_counts = {cat.id: 0 for cat in categories}
-        unread_counts[None] = 0
-        
-        # NEW: Track newest article timestamp per category
-        latest_timestamps = {cat.id: 0 for cat in categories}
-        latest_timestamps[None] = 0
-        latest_timestamps["all"] = 0
-        
-        read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
-        articles = session.exec(select(CachedArticle)).all()
-        total_unread = 0
-        
-        for article in articles:
-            cat_id = article.category_id
-            pub = article.published
-            
-            # Record the highest (newest) timestamp per category
-            if cat_id in latest_timestamps and pub > latest_timestamps[cat_id]:
-                latest_timestamps[cat_id] = pub
-            elif cat_id is None and pub > latest_timestamps[None]:
-                latest_timestamps[None] = pub
-                
-            if pub > latest_timestamps["all"]:
-                latest_timestamps["all"] = pub
-
-            if article.link not in read_links:
-                total_unread += 1
-                if cat_id in unread_counts: unread_counts[cat_id] += 1
-                elif cat_id is None: unread_counts[None] += 1
-
-        return templates.TemplateResponse("partials/category_tiles.html", {
-            "request": request, 
-            "categories": categories, 
-            "unread_counts": unread_counts, 
-            "total_unread": total_unread,
-            "latest_timestamps": latest_timestamps # PASS TO TEMPLATE
-        })
-
-
-
-@app.get("/reader/category/{category_id}/feeds", response_class=HTMLResponse)
-def get_feed_tiles(request: Request, category_id: str):
-    with Session(engine) as session:
-        cat_name = "All Feeds"
-        if category_id not in ["all", "none"]:
-            cat = session.get(Category, int(category_id))
-            if cat: cat_name = cat.name
-        elif category_id == "none": cat_name = "Uncategorized"
-
-        read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
-        feeds_list = []
-        
-        cols = session.exec(select(Collection)).all()
-        for col in cols:
-            if category_id == "all" or (category_id == "none" and col.category_id is None) or (category_id not in ["all", "none"] and str(col.category_id) == category_id):
-                # NEW: Clean and parse the keywords into a list
-                raw_kw = col.focus_keywords or ""
-                kw_list = [k.strip() for k in raw_kw.split(",") if k.strip()]
-                feeds_list.append({"id": f"col_{col.id}", "name": f"✨ {col.name}", "type": "collection", "db_id": col.id, "url": "", "keywords": kw_list})
-                
-        subs = session.exec(select(Subscription)).all()
-        for sub in subs:
-            if category_id == "all" or (category_id == "none" and sub.category_id is None) or (category_id not in ["all", "none"] and str(sub.category_id) == category_id):
-                feeds_list.append({"id": f"sub_{sub.id}", "name": sub.title or sub.url, "type": "subscription", "db_id": sub.id, "url": sub.url, "keywords": []})
-                
-        unread_counts = {f["id"]: 0 for f in feeds_list}
-        total_unread = 0
-        
-        articles = session.exec(select(CachedArticle)).all()
-        for article in articles:
-            if article.link not in read_links:
-                if article.feed_id in unread_counts:
-                    unread_counts[article.feed_id] += 1
-                if category_id == "all" or str(article.category_id) == category_id or (category_id == "none" and article.category_id is None):
-                    total_unread += 1
-
-        return templates.TemplateResponse("partials/feed_tiles.html", {
-            "request": request, "feeds": feeds_list, "unread_counts": unread_counts,
-            "category_id": category_id, "category_name": cat_name, "total_unread": total_unread
-        })
 import re
 from urllib.parse import urljoin, unquote, quote, urlparse
 
@@ -1478,6 +1375,73 @@ def truncate_text(text: str, limit: int) -> str:
     return text[:limit] + "... [Text Truncated]"
 
 
+def _batch_scrape_subscription(sub_id: int):
+    """
+    Background job: scrape unscraped articles for a subscription, newest first.
+    Rate-limited (2s between articles, 15s pause every 5 articles) to avoid hammering sites.
+    Stops early if auto_scrape is turned off mid-run. Max 100 articles per invocation.
+    """
+    with _batch_scrape_lock:
+        if sub_id in _active_batch_scrapes:
+            logger.info(f"[Batch-Scrape] Sub {sub_id} already has a scrape job running, skipping.")
+            return
+        _active_batch_scrapes.add(sub_id)
+
+    BATCH_SIZE = 5
+    DELAY_BETWEEN_ARTICLES = 2.0
+    DELAY_BETWEEN_BATCHES = 15.0
+    MAX_ARTICLES = 100
+
+    try:
+        with Session(engine) as session:
+            links = [
+                a.link for a in session.exec(
+                    select(CachedArticle)
+                    .where(CachedArticle.feed_id == f"sub_{sub_id}")
+                    .where(CachedArticle.scraped_content == None)
+                    .order_by(CachedArticle.published.desc())
+                    .limit(MAX_ARTICLES)
+                ).all()
+            ]
+
+        if not links:
+            logger.info(f"[Batch-Scrape] Sub {sub_id}: no unscraped articles found.")
+            return
+
+        logger.info(f"[Batch-Scrape] Sub {sub_id}: queued {len(links)} articles to scrape.")
+
+        for i, link in enumerate(links):
+            # Stop if auto_scrape was turned off
+            with Session(engine) as session:
+                sub = session.get(Subscription, sub_id)
+                if not sub or not sub.auto_scrape:
+                    logger.info(f"[Batch-Scrape] Sub {sub_id}: auto_scrape disabled, stopping early.")
+                    break
+
+            try:
+                html = scrape_article_html(link)
+                with Session(engine) as session:
+                    art = session.exec(select(CachedArticle).where(CachedArticle.link == link)).first()
+                    if art and not art.scraped_content:
+                        art.scraped_content = html
+                        session.add(art)
+                        session.commit()
+                logger.info(f"[Batch-Scrape] Sub {sub_id}: scraped {i+1}/{len(links)}")
+            except Exception as e:
+                logger.warning(f"[Batch-Scrape] Sub {sub_id}: failed {link}: {e}")
+
+            if i < len(links) - 1:
+                time.sleep(DELAY_BETWEEN_ARTICLES)
+                if (i + 1) % BATCH_SIZE == 0:
+                    logger.info(f"[Batch-Scrape] Sub {sub_id}: batch pause...")
+                    time.sleep(DELAY_BETWEEN_BATCHES)
+
+        logger.info(f"[Batch-Scrape] Sub {sub_id}: batch complete.")
+    finally:
+        with _batch_scrape_lock:
+            _active_batch_scrapes.discard(sub_id)
+
+
 @app.post("/reader/fetch_content")
 def fetch_content(url: str = Form(...)):
     try:
@@ -1581,736 +1545,6 @@ def image_proxy(url: str):
 
 
 
-
-
-@app.get("/reader/stream", response_class=HTMLResponse)
-def reader_stream(request: Request, category_id: str = "all", feed_id: str = None):
-    category_name = "All Feeds"
-    with Session(engine) as session:
-        settings = get_settings(session) # Fetch settings to get the limit
-        
-        if category_id and category_id not in ["all", "none"]:
-            cat = session.get(Category, int(category_id))
-            if cat: category_name = cat.name
-        elif category_id == "none": category_name = "Uncategorized"
-            
-        read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
-        
-        # Apply the PWA Cache Limit setting here
-        query = select(CachedArticle).order_by(CachedArticle.published.desc()).limit(settings.pwa_offline_limit)
-        # ... (rest of the function stays exactly the same)
-        if feed_id: query = query.where(CachedArticle.feed_id == feed_id)
-        else:
-            if category_id == "none": query = query.where(CachedArticle.category_id == None)
-            elif category_id != "all": query = query.where(CachedArticle.category_id == int(category_id))
-            
-        db_articles = session.exec(query).all()
-        articles = []
-        for a in db_articles:
-            art_dict = a.model_dump()
-            art_dict['is_read'] = a.link in read_links
-            dt = datetime.datetime.fromtimestamp(a.published)
-            art_dict['published_str'] = dt.strftime("%b %d, %H:%M")
-            articles.append(art_dict)
-
-    return templates.TemplateResponse("partials/stream.html", {"request": request, "articles": articles, "category_name": category_name, "category_id": category_id, "feed_id":feed_id})
-
-
-
-
-@app.post("/reader/mark_read")
-def mark_read(url: str = Form(...)):
-    with Session(engine) as session:
-        if not session.exec(select(ReadItem).where(ReadItem.item_link == url)).first():
-            session.add(ReadItem(item_link=url)); session.commit()
-    return Response(status_code=200)
-
-@app.post("/reader/mark_category_read", response_class=HTMLResponse)
-def mark_category_read(request: Request, category_id: str = Form(...)):
-    with Session(engine) as session:
-        read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
-        new_reads = []
-        query = select(CachedArticle)
-        if category_id == "none": query = query.where(CachedArticle.category_id == None)
-        elif category_id != "all": query = query.where(CachedArticle.category_id == int(category_id))
-        articles = session.exec(query).all()
-        for a in articles:
-            if a.link not in read_links:
-                new_reads.append(ReadItem(item_link=a.link))
-                read_links.add(a.link)
-        if new_reads: session.add_all(new_reads); session.commit()
-    return get_category_tiles(request)
-
-@app.post("/reader/mark_feed_read", response_class=HTMLResponse)
-def mark_feed_read(request: Request, feed_id: str = Form(...), category_id: str = Form(...)):
-    with Session(engine) as session:
-        read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
-        new_reads = []
-        articles = session.exec(select(CachedArticle).where(CachedArticle.feed_id == feed_id)).all()
-        for a in articles:
-            if a.link not in read_links:
-                new_reads.append(ReadItem(item_link=a.link))
-                read_links.add(a.link)
-        if new_reads: session.add_all(new_reads); session.commit()
-    return get_feed_tiles(request, category_id)
-
-@app.post("/reader/summarize_article", response_class=HTMLResponse)
-def summarize_single_article(text: str = Form(...)):
-    with Session(engine) as session:
-        settings = get_settings(session)
-        
-        if not text or len(text.strip()) < 10:
-            return "<p>Error: Not enough text provided to summarize.</p>"
-
-        # Limit text length to avoid blowing up the context window on massive articles
-        limit = 25000 
-        if len(text) > limit:
-            text = text[:limit] + "... [Text Truncated]"
-
-        system_prompt = (
-            "You are an expert AI reading assistant. Provide a concise, highly insightful summary of the provided text. "
-            "Highlight the main points and key takeaways. Format your response in clean HTML, using <p>, <ul>, <li>, "
-            "and <strong> tags to make it easy to scan. Do not include markdown code block syntax (like ```html)."
-        )
-        
-        try:
-            summary_html = call_llm(settings, f"Summarize this text:\n\n{text}", system_prompt)
-            # Strip markdown formatting just in case the LLM disobeys the prompt
-            summary_html = summary_html.replace("```html", "").replace("```", "").strip()
-            return summary_html
-        except Exception as e:
-            logger.error(f"Single Article Summary Failed: {e}")
-            return f"<p style='color: #ff4444;'>Error generating summary: {str(e)}</p>"
-
-
-
-
-@app.post("/reader/mark_read_bulk")
-def mark_read_bulk(urls: str = Form(...)):
-    # `urls` is a comma-separated list of article links.
-    url_list = [u.strip() for u in (urls or "").split(",") if u.strip()]
-    if not url_list:
-        return Response(status_code=200)
-
-    with Session(engine) as session:
-        existing = session.exec(select(ReadItem).where(ReadItem.item_link.in_(url_list))).all()
-        existing_set = {x.item_link for x in existing}
-
-        new_reads = [ReadItem(item_link=u) for u in url_list if u not in existing_set]
-        if new_reads:
-            session.add_all(new_reads)
-            session.commit()
-
-    return Response(status_code=200)
-
-
-@app.post("/reader/summarize_articles", response_class=HTMLResponse)
-def summarize_selected_articles(urls: str = Form(...), scrape: str = Form("0")):
-    """
-    Generate one combined HTML summary for multiple selected articles.
-    If `scrape` is enabled, each URL is scraped via the Postlight parser sidecar first.
-    """
-    url_list = [u.strip() for u in (urls or "").split(",") if u.strip()]
-    if not url_list:
-        return "<p>Error: No articles selected.</p>"
-
-    scrape_before = str(scrape).strip().lower() in ("1", "true", "yes", "on")
-
-    # Avoid runaway token usage.
-    max_selected = 10
-    if len(url_list) > max_selected:
-        return f"<p style='color: #ff4444;'>Error: Please select up to {max_selected} articles.</p>"
-
-    # Text limits
-    per_article_limit = 7000
-    overall_limit = 25000
-
-    with Session(engine) as session:
-        settings = get_settings(session)
-
-        cached_by_link = {}
-        for a in session.exec(select(CachedArticle).where(CachedArticle.link.in_(url_list))).all():
-            cached_by_link[a.link] = a
-
-    article_chunks = []
-    remaining = overall_limit
-
-    for idx, link in enumerate(url_list, start=1):
-        cached = cached_by_link.get(link)
-        title = (cached.title if cached else None) or f"Article {idx}"
-
-        try:
-            if scrape_before:
-                html = scrape_article_html(link)
-                text = html_to_plain_text(html)
-            else:
-                if not cached:
-                    continue
-                text = html_to_plain_text(cached.display_body)
-        except Exception as e:
-            logger.error(f"Batch summary scrape failed for {link}: {e}")
-            # Fallback to cached snippet if available.
-            if cached:
-                text = html_to_plain_text(cached.display_body)
-            else:
-                continue
-
-        text = truncate_text(text, per_article_limit).strip()
-        if len(text) < 20:
-            continue
-
-        chunk = f"Article {idx}: {title}\nURL: {link}\n\n{text}"
-
-        # Enforce overall cap
-        if len(chunk) > remaining:
-            chunk = truncate_text(chunk, remaining).strip()
-
-        article_chunks.append(chunk)
-        remaining -= len(chunk)
-        if remaining <= 0:
-            break
-
-    if not article_chunks:
-        return "<p style='color: #ff4444;'>Error: Could not extract enough text from the selected articles.</p>"
-
-    combined_text = "\n\n---\n\n".join(article_chunks)
-    combined_text = truncate_text(combined_text, overall_limit)
-
-    system_prompt = (
-        "You are an expert AI reading assistant. You will be given multiple articles. "
-        "Create a single combined summary. Include: (1) a short combined overview of key themes, "
-        "(2) a per-article set of key takeaways, and (3) any cross-article connections or notable differences. "
-        "Format your response in clean HTML using <p>, <ul>, <li>, and <strong> tags. "
-        "Do not include markdown code block syntax (like ```html)."
-    )
-
-    try:
-        summary_html = call_llm(
-            settings,
-            f"Summarize these articles together:\n\n{combined_text}",
-            system_prompt,
-        )
-        summary_html = summary_html.replace("```html", "").replace("```", "").strip()
-        return summary_html
-    except Exception as e:
-        logger.error(f"Batch Article Summary Failed: {e}")
-        return f"<p style='color: #ff4444;'>Error generating summary: {str(e)}</p>"
-
-
-@app.delete("/subscriptions/{sub_id}")
-def delete_subscription(request: Request, sub_id: int, category_id: str = "all"):
-    with Session(engine) as session:
-        sub = session.get(Subscription, sub_id)
-        if sub:
-            arts = session.exec(select(CachedArticle).where(CachedArticle.feed_id == f"sub_{sub_id}")).all()
-            for art in arts: session.delete(art)
-            session.delete(sub); session.commit()
-    return get_feed_tiles(request, category_id)
-
-@app.post("/categories/{cat_id}/rename")
-def rename_category(request: Request, cat_id: int, hx_prompt: str = Header(None, alias="HX-Prompt")):
-    if hx_prompt and hx_prompt.strip():
-        with Session(engine) as session:
-            cat = session.get(Category, cat_id)
-            if cat:
-                cat.name = hx_prompt.strip()
-                session.add(cat); session.commit()
-    return get_category_tiles(request)
-
-@app.delete("/categories/{cat_id}")
-def delete_category(request: Request, cat_id: int):
-    with Session(engine) as session:
-        cat = session.get(Category, cat_id)
-        if cat:
-            subs = session.exec(select(Subscription).where(Subscription.category_id == cat_id)).all()
-            for sub in subs: sub.category_id = None; session.add(sub)
-            cols = session.exec(select(Collection).where(Collection.category_id == cat_id)).all()
-            for col in cols: col.category_id = None; session.add(col)
-            arts = session.exec(select(CachedArticle).where(CachedArticle.category_id == cat_id)).all()
-            for art in arts: art.category_id = None; session.add(art)
-            session.delete(cat); session.commit()
-    return get_category_tiles(request)
-
-@app.post("/categories/{cat_id}/create_collection")
-def create_collection_from_category(cat_id: str):
-    with Session(engine) as session:
-        if cat_id == "all":
-            subs = session.exec(select(Subscription)).all()
-            col_name = "All Feeds Digest"
-        elif cat_id == "none":
-            subs = session.exec(select(Subscription).where(Subscription.category_id == None)).all()
-            col_name = "Uncategorized Digest"
-        else:
-            cat = session.get(Category, int(cat_id))
-            if not cat: return Response("Not found", 404)
-            subs = session.exec(select(Subscription).where(Subscription.category_id == int(cat_id))).all()
-            col_name = f"{cat.name} Digest"
-            
-        # NEW: Find or create the AI Digest category to use as the destination
-        ai_cat = session.exec(select(Category).where(Category.name == "AI Digest")).first()
-        if not ai_cat:
-            ai_cat = Category(name="AI Digest")
-            session.add(ai_cat); session.commit(); session.refresh(ai_cat)
-        
-        # Override the destination category
-        assign_cat = ai_cat.id
-        
-        # Build URL-safe slug
-        slug = re.sub(r'[^a-z0-9]', '-', col_name.lower()) + "-" + str(int(time.time()))
-        settings = get_settings(session)
-        safe_keywords = settings.default_focus_keywords or ""
-        
-        new_col = Collection(
-            name=col_name, slug=slug, schedule_time=settings.default_schedule,
-            context_length=settings.default_context_length, filter_max_articles=settings.default_filter_max,
-            filter_age=settings.default_filter_age, system_prompt=settings.default_system_prompt, category_id=assign_cat,
-            focus_keywords=safe_keywords
-        )
-        session.add(new_col)
-        session.commit()
-        session.refresh(new_col)
-        
-        for sub in subs:
-            if not session.exec(select(Feed).where(Feed.collection_id == new_col.id, Feed.url == sub.url)).first():
-                session.add(Feed(url=sub.url, collection_id=new_col.id))
-        session.commit()
-        
-    return Response(headers={"HX-Redirect": "/collections"})
-
-
-# --- NEW: Add Single Feed to Collection ---
-@app.post("/collections/add_feed_by_url")
-def add_feed_by_url(collection_id: int = Form(...), url: str = Form(...)):
-    with Session(engine) as session:
-        if not session.exec(select(Feed).where(Feed.collection_id == collection_id, Feed.url == url)).first():
-            session.add(Feed(url=url, collection_id=collection_id)); session.commit()
-            return HTMLResponse("<span style='color: #4CAF50;'>Feed added! You can safely close this window.</span>")
-        else:
-            return HTMLResponse("<span style='color: #888;'>This feed is already in the collection.</span>")
-
-@app.post("/categories/add")
-def add_category(name: str = Form(...)):
-    with Session(engine) as session:
-        if not session.exec(select(Category).where(Category.name == name)).first():
-            session.add(Category(name=name)); session.commit()
-    return Response(headers={"HX-Refresh": "true"})
-
-
-
-@app.post("/subscriptions/add")
-def add_subscription(url: str = Form(...), category_id: str = Form("none")):
-    with Session(engine) as session:
-        if not session.exec(select(Subscription).where(Subscription.url == url)).first():
-            try:
-                f = fetch_external_feed(url)
-                title = f.feed.get('title', 'New Feed') if f else 'New Feed'
-            except: title = "New Feed"
-            
-            # Safely parse the dropdown value
-            cat = int(category_id) if category_id and category_id.isdigit() else None
-            
-            session.add(Subscription(url=url, title=title, category_id=cat))
-            session.commit()
-            
-    from threading import Thread
-    Thread(target=sync_all_feeds).start()
-    return Response(headers={"HX-Refresh": "true"})
-
-
-@app.post("/subscriptions/{sub_id}/change_category")
-def change_subscription_category(sub_id: int, category_id: str = Form("none")):
-    """Moves an existing subscription to a new category."""
-    with Session(engine) as session:
-        sub = session.get(Subscription, sub_id)
-        if sub:
-            cat = int(category_id) if category_id and category_id.isdigit() else None
-            sub.category_id = cat
-            session.add(sub)
-            session.commit()
-    return Response(headers={"HX-Refresh": "true"})
-
-@app.get("/components/category_options")
-def get_category_options():
-    """Returns HTMX-ready <option> tags, with built-in error catching."""
-    try:
-        with Session(engine) as session:
-            cats = session.exec(select(Category).order_by(Category.name)).all()
-            options = '<option value="none">-- Uncategorized --</option>'
-            for c in cats:
-                # Safely handle the string just in case a category has no name
-                name_str = html.escape(str(c.name)) if c.name else "Unnamed"
-                options += f'<option value="{c.id}">{name_str}</option>'
-            return HTMLResponse(options)
-    except Exception as e:
-        logger.error(f"Failed to load category options: {e}")
-        return HTMLResponse(f'<option value="none">Error loading categories</option>')
-
-
-
-# ... (Keep existing /subscriptions/import_opml and /export.opml and settings endpoints) ...
-@app.get("/subscriptions/export.opml")
-def export_subscriptions_opml():
-    with Session(engine) as session:
-        subs = session.exec(select(Subscription)).all()
-        opml = ET.Element("opml", version="1.0")
-        head = ET.SubElement(opml, "head")
-        ET.SubElement(head, "title").text = "Feed Factory Subscriptions"
-        body = ET.SubElement(opml, "body")
-        for sub in subs:
-            cat_name = ""
-            if sub.category_id:
-                cat = session.get(Category, sub.category_id)
-                if cat: cat_name = cat.name
-            ET.SubElement(body, "outline", type="rss", text=sub.title or sub.url, xmlUrl=sub.url, category=cat_name)
-        return StreamingResponse(
-            io.BytesIO(ET.tostring(opml, encoding="utf-8")), media_type="application/xml", 
-            headers={"Content-Disposition": 'attachment; filename="subscriptions.opml"'}
-        )
-
-@app.post("/subscriptions/import_opml", response_class=HTMLResponse)
-async def import_subscriptions_opml(request: Request, file: UploadFile = File(...)):
-    content_bytes = await file.read()
-    try: content_str = content_bytes.decode("utf-8")
-    except: content_str = content_bytes.decode("latin-1")
-    content_str = re.sub(r'&(?!(?:[a-zA-Z][a-zA-Z0-9]*|#[0-9]+);)', '&amp;', content_str)
-    feeds_to_import = []
-    try:
-        root = ET.fromstring(content_str)
-        body = root.find('body')
-        if body is not None:
-            def parse_outlines(elements, current_category=None):
-                for elem in elements:
-                    if not elem.tag.endswith('outline'): continue
-                    url = elem.get('xmlUrl') or elem.get('url')
-                    title = elem.get('text') or elem.get('title') or url
-                    cat = elem.get('category') or current_category
-                    if url: feeds_to_import.append({'url': url, 'title': title, 'category': cat})
-                    else:
-                        folder_title = elem.get('title') or elem.get('text')
-                        parse_outlines(list(elem), current_category=folder_title)
-            parse_outlines(list(body))
-        with Session(engine) as session:
-            for feed_data in feeds_to_import:
-                url = feed_data['url']; title = feed_data['title']; cat_name = feed_data['category']; cat_id = None
-                if cat_name:
-                    cat = session.exec(select(Category).where(Category.name == cat_name)).first()
-                    if not cat:
-                        cat = Category(name=cat_name)
-                        session.add(cat); session.commit(); session.refresh(cat)
-                    cat_id = cat.id
-                if not session.exec(select(Subscription).where(Subscription.url == url)).first():
-                    session.add(Subscription(url=url, title=title, category_id=cat_id))
-            session.commit()
-    except Exception as e: return Response(f"Error parsing OPML: {str(e)}", status_code=400)
-    from threading import Thread
-    Thread(target=sync_all_feeds).start()
-    return get_category_tiles(request)
-
-
-
-
-@app.post("/reader/force_sync")
-def force_sync_all(background_tasks: BackgroundTasks):
-    """Triggers a background sync without freezing the UI."""
-    # Note: If you have a specific scraping function like `update_all_feeds()`,
-    # you can uncomment the line below to run it immediately in the background:
-    background_tasks.add_task(sync_all_feeds)
-    return HTMLResponse("Sync Started")
-
-
-
-
-@app.get("/settings", response_class=HTMLResponse)
-def read_settings(request: Request):
-    with Session(engine) as session:
-        settings = get_settings(session)
-        return templates.TemplateResponse("settings.html", {
-            "request": request,
-            "settings": settings,
-            "demo_mode": DEMO_MODE,
-            "api_key_is_set": bool(settings.api_key),
-        })
-
-@app.post("/settings/update")
-async def update_global_settings(request: Request):
-    """Bulletproof save endpoint using safe FormData extraction."""
-    form = await request.form()
-    with Session(engine) as session:
-        settings = get_settings(session)
-
-        settings.api_type = "openai"
-
-        # In demo mode, skip AI provider fields entirely
-        if not DEMO_MODE:
-            if form.get("api_endpoint") is not None: settings.api_endpoint = form.get("api_endpoint")
-            if form.get("api_key"): settings.api_key = form.get("api_key")
-            if form.get("model_name") is not None: settings.model_name = clean_model_id(form.get("model_name"))
-        if form.get("default_schedule") is not None: settings.default_schedule = form.get("default_schedule")
-        if form.get("default_filter_age") is not None: settings.default_filter_age = form.get("default_filter_age")
-        if form.get("default_system_prompt") is not None: settings.default_system_prompt = form.get("default_system_prompt")
-        if form.get("reader_font_family") is not None:
-            settings.reader_font_family = _sanitize_css_value(form.get("reader_font_family"))
-        if form.get("reader_font_size") is not None:
-            settings.reader_font_size = _sanitize_css_value(form.get("reader_font_size"))
-        if form.get("reader_line_height") is not None:
-            settings.reader_line_height = _sanitize_css_value(form.get("reader_line_height"))
-        if form.get("default_focus_keywords") is not None: settings.default_focus_keywords = form.get("default_focus_keywords")
-        
-        # Safely extract and apply integers
-        try:
-            if form.get("default_context_length"): settings.default_context_length = int(form.get("default_context_length"))
-            if form.get("default_filter_max"): settings.default_filter_max = int(form.get("default_filter_max"))
-            if form.get("retention_read_days"): settings.retention_read_days = int(form.get("retention_read_days"))
-            if form.get("retention_unread_days"): settings.retention_unread_days = int(form.get("retention_unread_days"))
-            if form.get("pwa_offline_limit"): settings.pwa_offline_limit = int(form.get("pwa_offline_limit"))
-        except ValueError:
-            pass # Ignore invalid numbers rather than crashing
-            
-        session.add(settings)
-        session.commit()
-        
-    return HTMLResponse("<span style='color: #4CAF50; font-weight: bold;'>✅ Settings Saved Successfully!</span>")
-
-
-
-@app.post("/settings/test_llm")
-async def test_llm_connection(request: Request):
-    """Tests the LLM connection using the currently typed inputs, even if unsaved."""
-    if DEMO_MODE:
-        return HTMLResponse("<span style='color: #ff4444; font-weight: bold;'>❌ Connection testing is disabled in demo mode.</span>")
-    form = await request.form()
-
-    with Session(engine) as session:
-        # Load base settings, but override them with whatever is typed in the form right now
-        settings = get_settings(session)
-        if form.get("api_endpoint"): settings.api_endpoint = form["api_endpoint"]
-        if form.get("api_key"): settings.api_key = form["api_key"]
-        if form.get("model_name"): settings.model_name = form["model_name"]
-        
-    try:
-        # Send a tiny prompt to verify the connection
-        res = call_llm(settings, "Reply with 'Connection successful!' and nothing else.", "You are a helpful assistant.")
-        return HTMLResponse(f"<span style='color: #4CAF50; font-weight: bold;'>✅ {res}</span>")
-    except Exception as e:
-        return HTMLResponse(f"<span style='color: #ff4444; font-weight: bold;'>❌ Failed: {str(e)}</span>")
-
-
-
-
-
-@app.get("/settings/backup")
-def backup_database():
-    """Downloads the raw SQLite database file."""
-    if DEMO_MODE:
-        raise HTTPException(status_code=403, detail="Backups are disabled in demo mode.")
-    timestamp = int(time.time())
-    return FileResponse(
-        DB_FILE,
-        media_type="application/octet-stream",
-        filename=f"feedfactory_backup_{timestamp}.db"
-    )
-
-@app.post("/settings/restore")
-async def restore_database(file: UploadFile = File(...)):
-    """Overwrites the current database with an uploaded backup."""
-    if DEMO_MODE:
-        raise HTTPException(status_code=403, detail="Database restore is disabled in demo mode.")
-    content = await file.read()
-    with open(DB_FILE, "wb") as f:
-        f.write(content)
-    return HTMLResponse("<span style='color: #4CAF50; font-weight: bold;'>Database restored! Please restart your Docker container to apply changes.</span>")
-
-
-@app.get("/collections", response_class=HTMLResponse)
-def manage_collections(request: Request):
-    with Session(engine) as session:
-        collections = session.exec(select(Collection)).all()
-        categories = session.exec(select(Category)).all()
-        settings = get_settings(session)
-        missing_auth = not settings.api_endpoint
-        return templates.TemplateResponse("collections.html", {
-            "request": request, "collections": collections, "categories": categories, "default_prompt": settings.default_system_prompt,
-            "server_time": datetime.datetime.now().strftime("%H:%M"), "missing_auth": missing_auth
-        })
-
-
-@app.post("/collections/add")
-def add_collection(name: str = Form(...), slug: str = Form(...), category_id: str = Form("none")):
-    slug = _sanitize_slug(slug)
-    if not slug:
-        return Response(content="Error: Invalid slug", status_code=400)
-    with Session(engine) as session:
-        if session.exec(select(Collection).where(Collection.slug == slug)).first(): return Response(content="Error: Slug exists", status_code=400)
-        g = get_settings(session)
-        cat_id = None if category_id == "none" else int(category_id)
-        
-        # FIX 1 (Repeated): Safely fallback to an empty string
-        safe_keywords = g.default_focus_keywords or ""
-        
-        col = Collection(
-            name=name, slug=slug, schedule_time=g.default_schedule, 
-            context_length=g.default_context_length, filter_max_articles=g.default_filter_max, 
-            filter_age=g.default_filter_age, system_prompt=g.default_system_prompt, 
-            category_id=cat_id, focus_keywords=safe_keywords
-        )
-        session.add(col)
-        session.commit()
-    return Response(headers={"HX-Refresh": "true"})
-
-
-@app.post("/collections/{cid}/update")
-def update_collection(cid: int, name: str = Form(...), slug: str = Form(...), category_id: str = Form("none")):
-    slug = _sanitize_slug(slug)
-    if not slug:
-        return Response("Error: Invalid slug", status_code=400)
-    with Session(engine) as session:
-        col = session.get(Collection, cid)
-        if not col: return Response("Not found", 404)
-        old_slug = col.slug
-        if slug != old_slug:
-            if session.exec(select(Collection).where(Collection.slug == slug)).first(): return Response("Error: Slug taken", 400)
-            if os.path.exists(f"/app/data/feeds/{old_slug}.xml"): os.rename(f"/app/data/feeds/{old_slug}.xml", f"/app/data/feeds/{slug}.xml")
-        col.name = name; col.slug = slug
-        col.category_id = None if category_id == "none" else int(category_id)
-        session.add(col); session.commit()
-    return Response(headers={"HX-Refresh": "true"})
-
-@app.delete("/collections/{cid}")
-def delete_collection(cid: int):
-    with Session(engine) as session:
-        col = session.get(Collection, cid)
-        if col:
-            if os.path.exists(f"/app/data/feeds/{col.slug}.xml"): os.remove(f"/app/data/feeds/{col.slug}.xml")
-            for feed in col.feeds: session.delete(feed)
-            session.delete(col); session.commit()
-    return Response(headers={"HX-Refresh": "true"})
-
-@app.post("/collections/{cid}/update_settings")
-def update_settings(
-    cid: int,
-    schedule_time: str = Form(...),
-    context_length: int = Form(...),
-    filter_max_articles: int = Form(...),
-    max_articles_per_topic: int = Form(...),
-    filter_age: str = Form(...),
-    focus_keywords: str = Form(""),
-    rag_top_k: int = Form(3),
-    rag_min_similarity: float = Form(0.60),
-    rag_eviction_days: int = Form(14),
-):
-    with Session(engine) as session:
-        col = session.get(Collection, cid)
-        if col:
-            col.schedule_time = schedule_time
-            col.context_length = context_length
-            col.filter_max_articles = filter_max_articles
-            col.filter_age = filter_age
-            col.max_articles_per_topic = max_articles_per_topic
-            col.focus_keywords = focus_keywords
-            col.rag_top_k = rag_top_k
-            col.rag_min_similarity = rag_min_similarity
-            col.rag_eviction_days = rag_eviction_days
-            session.add(col)
-            session.commit()
-    return "Saved"
-
-
-@app.post("/collections/{cid}/update_prompt")
-def update_prompt(cid: int, system_prompt: str = Form(...)):
-    with Session(engine) as session:
-        col = session.get(Collection, cid)
-        if col: col.system_prompt = system_prompt; session.add(col); session.commit()
-    return "Saved"
-
-@app.post("/collections/{cid}/add_feed")
-def add_feed(cid: int, url: str = Form(...)):
-    with Session(engine) as session:
-        session.add(Feed(url=url, collection_id=cid)); session.commit()
-        col = session.get(Collection, cid)
-        return HTMLResponse(render_feed_rows(cid, col.feeds))
-
-@app.delete("/feeds/{fid}")
-def delete_feed(fid: int):
-    with Session(engine) as session:
-        feed = session.get(Feed, fid)
-        cid = feed.collection_id; session.delete(feed); session.commit()
-        col = session.get(Collection, cid)
-        return HTMLResponse(render_feed_rows(cid, col.feeds))
-
-@app.post("/collections/{cid}/toggle_active")
-def toggle_active(cid: int):
-    with Session(engine) as session:
-        col = session.get(Collection, cid)
-        if col:
-            col.is_active = not col.is_active
-            session.add(col)
-            session.commit()
-    return "Toggled"
-
-
-
-@app.post("/collections/{cid}/trigger")
-def trigger_now(cid: int):
-    from threading import Thread
-    t = Thread(target=generate_digest_for_collection, args=(cid,))
-    t.start()
-    return "Started"
-
-@app.post("/collections/trigger_all")
-def trigger_all():
-    from threading import Thread
-    def run_all():
-        with Session(engine) as session: 
-            # Filter out disabled collections
-            cids = [c.id for c in session.exec(select(Collection).where(Collection.is_active == True)).all()]
-        for cid in cids:
-            try: generate_digest_for_collection(cid)
-            except: pass
-    t = Thread(target=run_all); t.start()
-    return "Started All"
-
-
-@app.get("/status.json")
-def get_all_status():
-    with Session(engine) as session:
-        collections = session.exec(select(Collection)).all()
-        data = {}
-        for col in collections:
-            text = "Pending"; status = "pending"
-            if col.is_generating: text = "Generating..."; status = "generating"
-            elif col.last_run: text = col.last_run.strftime('%d %b %H:%M'); status = "done"
-            data[col.id] = {"text": text, "status": status}
-        return data
-
-@app.get("/collections/{cid}/export.opml")
-def export_opml(cid: int):
-    with Session(engine) as session:
-        col = session.get(Collection, cid)
-        if not col: return Response("Not found", 404)
-        opml = ET.Element("opml", version="1.0"); head = ET.SubElement(opml, "head"); ET.SubElement(head, "title").text = f"{col.name} Feeds"; body = ET.SubElement(opml, "body")
-        for feed in col.feeds: ET.SubElement(body, "outline", type="rss", text=feed.url, xmlUrl=feed.url)
-        return StreamingResponse(io.BytesIO(ET.tostring(opml, encoding="utf-8")), media_type="application/xml", headers={"Content-Disposition": f'attachment; filename="{col.slug}.opml"'})
-
-@app.post("/collections/{cid}/import_opml")
-async def import_opml(cid: int, file: UploadFile = File(...)):
-    content_bytes = await file.read()
-    try: content_str = content_bytes.decode("utf-8")
-    except: content_str = content_bytes.decode("latin-1")
-    content_str = re.sub(r'&(?!(?:[a-zA-Z][a-zA-Z0-9]*|#[0-9]+);)', '&amp;', content_str)
-    try:
-        root = ET.fromstring(content_str); urls = []
-        for elem in root.iter():
-            if elem.tag.endswith('outline'):
-                url = elem.get('xmlUrl') or elem.get('url')
-                if url: urls.append(url)
-        with Session(engine) as session:
-            for url in urls:
-                if not session.exec(select(Feed).where(Feed.collection_id == cid, Feed.url == url)).first(): session.add(Feed(url=url, collection_id=cid))
-            session.commit()
-            col = session.get(Collection, cid)
-            return HTMLResponse(render_feed_rows(cid, col.feeds))
-    except Exception as e:
-        return Response(f"Error: {str(e)}", 400)
 
 @app.get("/feeds/{slug}.xml")
 def get_feed_xml(slug: str):
@@ -2419,4 +1653,898 @@ def get_sw():
     });
     """
     return Response(content=js, media_type="application/javascript")
+
+
+# ==========================================
+#           JSON API ROUTES (Next.js)
+# ==========================================
+
+# --- Auth ---
+
+@app.get("/api/auth/status")
+def api_auth_status(request: Request):
+    if DEMO_MODE:
+        authenticated = request.cookies.get("demo_token") == _DEMO_TOKEN
+        return {"demo_mode": True, "authenticated": authenticated, "demo_user": DEMO_USER, "demo_pass": DEMO_PASS}
+    return {"demo_mode": False, "authenticated": True}
+
+@app.post("/api/auth/login")
+async def api_auth_login(request: Request):
+    data = await request.json()
+    username = data.get("username", "")
+    password = data.get("password", "")
+    if username == DEMO_USER and password == DEMO_PASS:
+        response = Response(content='{"ok":true}', media_type="application/json")
+        response.set_cookie("demo_token", _DEMO_TOKEN, httponly=True, secure=not DEV_MODE, samesite="lax", max_age=86400)
+        return response
+    return Response(content='{"detail":"Invalid credentials"}', status_code=401, media_type="application/json")
+
+@app.post("/api/auth/logout")
+def api_auth_logout():
+    response = Response(content='{"ok":true}', media_type="application/json")
+    response.delete_cookie("demo_token")
+    return response
+
+
+# --- Categories ---
+
+@app.get("/api/categories")
+def api_get_categories():
+    with Session(engine) as session:
+        categories = session.exec(select(Category).order_by(Category.name)).all()
+        read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
+        articles = session.exec(select(CachedArticle)).all()
+
+        unread_counts = {cat.id: 0 for cat in categories}
+        unread_counts[None] = 0
+        latest_timestamps = {cat.id: 0 for cat in categories}
+        latest_timestamps[None] = 0
+        latest_timestamps["all"] = 0
+        total_unread = 0
+
+        for article in articles:
+            cat_id = article.category_id
+            pub = article.published
+            if cat_id in latest_timestamps and pub > latest_timestamps[cat_id]:
+                latest_timestamps[cat_id] = pub
+            elif cat_id is None and pub > latest_timestamps[None]:
+                latest_timestamps[None] = pub
+            if pub > latest_timestamps["all"]:
+                latest_timestamps["all"] = pub
+            if article.link not in read_links:
+                total_unread += 1
+                if cat_id in unread_counts:
+                    unread_counts[cat_id] += 1
+                elif cat_id is None:
+                    unread_counts[None] += 1
+
+        has_uncategorized = unread_counts[None] > 0 or any(
+            a.category_id is None for a in articles
+        )
+        result = [
+            {
+                "id": cat.id,
+                "name": cat.name,
+                "unread_count": unread_counts.get(cat.id, 0),
+                "newest_ts": latest_timestamps.get(cat.id, 0),
+            }
+            for cat in categories
+        ]
+        return {
+            "categories": result,
+            "total_unread": total_unread,
+            "newest_ts_all": latest_timestamps["all"],
+            "uncategorized_unread": unread_counts[None],
+            "has_uncategorized": has_uncategorized,
+        }
+
+@app.post("/api/categories")
+async def api_add_category(request: Request):
+    data = await request.json()
+    name = data.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name required")
+    with Session(engine) as session:
+        existing = session.exec(select(Category).where(Category.name == name)).first()
+        if existing:
+            return {"id": existing.id, "name": existing.name}
+        cat = Category(name=name)
+        session.add(cat)
+        session.commit()
+        session.refresh(cat)
+        return {"id": cat.id, "name": cat.name}
+
+@app.patch("/api/categories/{cat_id}")
+async def api_rename_category(cat_id: int, request: Request):
+    data = await request.json()
+    new_name = data.get("name", "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Name required")
+    with Session(engine) as session:
+        cat = session.get(Category, cat_id)
+        if not cat:
+            raise HTTPException(status_code=404)
+        cat.name = new_name
+        session.add(cat)
+        session.commit()
+        return {"id": cat.id, "name": cat.name}
+
+@app.delete("/api/categories/{cat_id}")
+def api_delete_category(cat_id: int):
+    with Session(engine) as session:
+        cat = session.get(Category, cat_id)
+        if cat:
+            for sub in session.exec(select(Subscription).where(Subscription.category_id == cat_id)).all():
+                sub.category_id = None; session.add(sub)
+            for col in session.exec(select(Collection).where(Collection.category_id == cat_id)).all():
+                col.category_id = None; session.add(col)
+            for art in session.exec(select(CachedArticle).where(CachedArticle.category_id == cat_id)).all():
+                art.category_id = None; session.add(art)
+            session.delete(cat)
+            session.commit()
+    return Response(status_code=204)
+
+@app.post("/api/categories/{cat_id}/mark_read")
+def api_mark_category_read(cat_id: str):
+    with Session(engine) as session:
+        read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
+        query = select(CachedArticle)
+        if cat_id == "none":
+            query = query.where(CachedArticle.category_id == None)
+        elif cat_id != "all":
+            query = query.where(CachedArticle.category_id == int(cat_id))
+        articles = session.exec(query).all()
+        new_reads = [ReadItem(item_link=a.link) for a in articles if a.link not in read_links]
+        if new_reads:
+            session.add_all(new_reads)
+            session.commit()
+    return Response(status_code=204)
+
+
+# --- Category Feeds (feed tiles) ---
+
+@app.get("/api/categories/{category_id}/feeds")
+def api_get_feeds_by_category(category_id: str):
+    with Session(engine) as session:
+        read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
+        feeds_list = []
+
+        cols = session.exec(select(Collection)).all()
+        for col in cols:
+            if (category_id == "all" or
+                    (category_id == "none" and col.category_id is None) or
+                    (category_id not in ["all", "none"] and str(col.category_id) == category_id)):
+                kw_list = [k.strip() for k in (col.focus_keywords or "").split(",") if k.strip()]
+                feeds_list.append({
+                    "id": f"col_{col.id}", "name": col.name, "type": "collection",
+                    "db_id": col.id, "url": "", "keywords": kw_list, "auto_scrape": False
+                })
+
+        subs = session.exec(select(Subscription)).all()
+        for sub in subs:
+            if (category_id == "all" or
+                    (category_id == "none" and sub.category_id is None) or
+                    (category_id not in ["all", "none"] and str(sub.category_id) == category_id)):
+                feeds_list.append({
+                    "id": f"sub_{sub.id}", "name": sub.title or sub.url, "type": "subscription",
+                    "db_id": sub.id, "url": sub.url, "keywords": [], "auto_scrape": sub.auto_scrape
+                })
+
+        unread_counts = {f["id"]: 0 for f in feeds_list}
+        total_unread = 0
+        articles = session.exec(select(CachedArticle)).all()
+        for article in articles:
+            if article.link not in read_links:
+                if article.feed_id in unread_counts:
+                    unread_counts[article.feed_id] += 1
+                if (category_id == "all" or
+                        str(article.category_id) == category_id or
+                        (category_id == "none" and article.category_id is None)):
+                    total_unread += 1
+
+        cat_name = "All Feeds"
+        if category_id not in ["all", "none"]:
+            cat = session.get(Category, int(category_id))
+            if cat:
+                cat_name = cat.name
+        elif category_id == "none":
+            cat_name = "Uncategorized"
+
+        for f in feeds_list:
+            f["unread_count"] = unread_counts.get(f["id"], 0)
+
+        return {"feeds": feeds_list, "category_name": cat_name, "total_unread": total_unread}
+
+
+# --- Subscriptions ---
+
+@app.get("/api/subscriptions")
+def api_list_subscriptions():
+    with Session(engine) as session:
+        subs = session.exec(select(Subscription).order_by(Subscription.title)).all()
+        return [
+            {"id": s.id, "url": s.url, "title": s.title, "category_id": s.category_id}
+            for s in subs
+        ]
+
+@app.post("/api/subscriptions")
+async def api_add_subscription(request: Request):
+    data = await request.json()
+    url = data.get("url", "").strip()
+    category_id_raw = data.get("category_id")
+    cat_id = int(category_id_raw) if category_id_raw and str(category_id_raw).isdigit() else None
+    if not url:
+        raise HTTPException(status_code=400, detail="URL required")
+    with Session(engine) as session:
+        existing = session.exec(select(Subscription).where(Subscription.url == url)).first()
+        if existing:
+            return {"id": existing.id, "url": existing.url, "title": existing.title, "category_id": existing.category_id}
+        try:
+            f = fetch_external_feed(url)
+            title = f.feed.get('title', 'New Feed') if f else 'New Feed'
+        except:
+            title = 'New Feed'
+        sub = Subscription(url=url, title=title, category_id=cat_id)
+        session.add(sub)
+        session.commit()
+        session.refresh(sub)
+    from threading import Thread
+    Thread(target=sync_all_feeds).start()
+    return {"id": sub.id, "url": sub.url, "title": sub.title, "category_id": sub.category_id}
+
+@app.patch("/api/subscriptions/{sub_id}")
+async def api_update_subscription(sub_id: int, request: Request):
+    data = await request.json()
+    category_id_raw = data.get("category_id")
+    cat_id = int(category_id_raw) if category_id_raw and str(category_id_raw).isdigit() else None
+    with Session(engine) as session:
+        sub = session.get(Subscription, sub_id)
+        if not sub:
+            raise HTTPException(status_code=404)
+        sub.category_id = cat_id
+        session.add(sub)
+        session.commit()
+        return {"id": sub.id, "url": sub.url, "title": sub.title, "category_id": sub.category_id}
+
+@app.post("/api/subscriptions/{sub_id}/toggle_scrape")
+def api_toggle_subscription_scrape(sub_id: int):
+    with Session(engine) as session:
+        sub = session.get(Subscription, sub_id)
+        if not sub:
+            raise HTTPException(status_code=404)
+        sub.auto_scrape = not sub.auto_scrape
+        session.add(sub)
+        session.commit()
+        turned_on = sub.auto_scrape
+
+    if turned_on:
+        # Kick off background batch scrape for existing unscraped articles
+        threading.Thread(target=_batch_scrape_subscription, args=(sub_id,), daemon=True).start()
+
+    with Session(engine) as session:
+        sub = session.get(Subscription, sub_id)
+        return {"id": sub.id, "auto_scrape": sub.auto_scrape}
+
+@app.delete("/api/subscriptions/{sub_id}")
+def api_delete_subscription(sub_id: int):
+    with Session(engine) as session:
+        sub = session.get(Subscription, sub_id)
+        if sub:
+            for art in session.exec(select(CachedArticle).where(CachedArticle.feed_id == f"sub_{sub_id}")).all():
+                session.delete(art)
+            session.delete(sub)
+            session.commit()
+    return Response(status_code=204)
+
+@app.get("/api/subscriptions/export.opml")
+def api_export_subscriptions_opml():
+    return export_subscriptions_opml()
+
+@app.post("/api/subscriptions/import_opml")
+async def api_import_subscriptions_opml(request: Request, file: UploadFile = File(...)):
+    content_bytes = await file.read()
+    try:
+        content_str = content_bytes.decode("utf-8")
+    except:
+        content_str = content_bytes.decode("latin-1")
+    content_str = re.sub(r'&(?!(?:[a-zA-Z][a-zA-Z0-9]*|#[0-9]+);)', '&amp;', content_str)
+    feeds_to_import = []
+    try:
+        root = ET.fromstring(content_str)
+        body = root.find('body')
+        if body is not None:
+            def parse_outlines_api(elements, current_category=None):
+                for elem in elements:
+                    if not elem.tag.endswith('outline'):
+                        continue
+                    url = elem.get('xmlUrl') or elem.get('url')
+                    title = elem.get('text') or elem.get('title') or url
+                    cat = elem.get('category') or current_category
+                    if url:
+                        feeds_to_import.append({'url': url, 'title': title, 'category': cat})
+                    else:
+                        folder_title = elem.get('title') or elem.get('text')
+                        parse_outlines_api(list(elem), current_category=folder_title)
+            parse_outlines_api(list(body))
+        with Session(engine) as session:
+            for feed_data in feeds_to_import:
+                url = feed_data['url']
+                title = feed_data['title']
+                cat_name = feed_data['category']
+                cat_id = None
+                if cat_name:
+                    cat = session.exec(select(Category).where(Category.name == cat_name)).first()
+                    if not cat:
+                        cat = Category(name=cat_name)
+                        session.add(cat)
+                        session.commit()
+                        session.refresh(cat)
+                    cat_id = cat.id
+                if not session.exec(select(Subscription).where(Subscription.url == url)).first():
+                    session.add(Subscription(url=url, title=title, category_id=cat_id))
+            session.commit()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error parsing OPML: {str(e)}")
+    from threading import Thread
+    Thread(target=sync_all_feeds).start()
+    return {"imported": len(feeds_to_import)}
+
+
+# --- Articles ---
+
+@app.get("/api/articles")
+def api_get_articles(category_id: str = "all", feed_id: str = None, limit: int = 200):
+    with Session(engine) as session:
+        settings = get_settings(session)
+        read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
+        # Build auto_scrape lookup for subscriptions
+        sub_auto_scrape = {
+            f"sub_{s.id}": s.auto_scrape
+            for s in session.exec(select(Subscription)).all()
+        }
+        effective_limit = min(limit, settings.pwa_offline_limit)
+        query = select(CachedArticle).order_by(CachedArticle.published.desc()).limit(effective_limit)
+        if feed_id:
+            query = query.where(CachedArticle.feed_id == feed_id)
+        else:
+            if category_id == "none":
+                query = query.where(CachedArticle.category_id == None)
+            elif category_id != "all":
+                query = query.where(CachedArticle.category_id == int(category_id))
+        db_articles = session.exec(query).all()
+        result = []
+        for a in db_articles:
+            art_dict = a.model_dump(exclude={"scraped_content"})
+            art_dict['is_read'] = a.link in read_links
+            dt = datetime.datetime.fromtimestamp(a.published)
+            art_dict['published_str'] = dt.strftime("%b %d, %H:%M")
+            art_dict['auto_scrape'] = sub_auto_scrape.get(a.feed_id, False)
+            art_dict['has_scraped_content'] = a.scraped_content is not None
+            result.append(art_dict)
+        return result
+
+@app.post("/api/articles/mark_read")
+async def api_mark_read(request: Request):
+    data = await request.json()
+    url = data.get("url", "").strip()
+    if url:
+        with Session(engine) as session:
+            if not session.exec(select(ReadItem).where(ReadItem.item_link == url)).first():
+                session.add(ReadItem(item_link=url))
+                session.commit()
+    return Response(status_code=204)
+
+@app.post("/api/articles/mark_read_bulk")
+async def api_mark_read_bulk(request: Request):
+    data = await request.json()
+    url_list = [u.strip() for u in data.get("urls", []) if u.strip()]
+    if url_list:
+        with Session(engine) as session:
+            existing = {r.item_link for r in session.exec(select(ReadItem).where(ReadItem.item_link.in_(url_list))).all()}
+            new_reads = [ReadItem(item_link=u) for u in url_list if u not in existing]
+            if new_reads:
+                session.add_all(new_reads)
+                session.commit()
+    return Response(status_code=204)
+
+@app.post("/api/articles/mark_unread")
+async def api_mark_unread(request: Request):
+    data = await request.json()
+    url = data.get("url", "").strip()
+    if url:
+        with Session(engine) as session:
+            item = session.exec(select(ReadItem).where(ReadItem.item_link == url)).first()
+            if item:
+                session.delete(item)
+                session.commit()
+    return Response(status_code=204)
+
+@app.post("/api/articles/mark_unread_bulk")
+async def api_mark_unread_bulk(request: Request):
+    data = await request.json()
+    url_list = [u.strip() for u in data.get("urls", []) if u.strip()]
+    if url_list:
+        with Session(engine) as session:
+            items = session.exec(select(ReadItem).where(ReadItem.item_link.in_(url_list))).all()
+            for item in items:
+                session.delete(item)
+            session.commit()
+    return Response(status_code=204)
+
+@app.post("/api/articles/summarize")
+async def api_summarize_article(request: Request):
+    data = await request.json()
+    text = data.get("text", "")
+    if not text or len(text.strip()) < 10:
+        raise HTTPException(status_code=400, detail="Not enough text")
+    limit = 25000
+    if len(text) > limit:
+        text = text[:limit] + "... [Text Truncated]"
+    with Session(engine) as session:
+        settings = get_settings(session)
+    system_prompt = (
+        "You are an expert AI reading assistant. Provide a concise, highly insightful summary of the provided text. "
+        "Highlight the main points and key takeaways. Format your response in clean HTML, using <p>, <ul>, <li>, "
+        "and <strong> tags to make it easy to scan. Do not include markdown code block syntax (like ```html)."
+    )
+    try:
+        summary_html = call_llm(settings, f"Summarize this text:\n\n{text}", system_prompt)
+        summary_html = summary_html.replace("```html", "").replace("```", "").strip()
+        return {"summary": summary_html}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/articles/summarize_bulk")
+async def api_summarize_bulk(request: Request):
+    data = await request.json()
+    url_list = [u.strip() for u in data.get("urls", []) if u.strip()]
+    scrape_before = data.get("scrape", False)
+    if not url_list:
+        raise HTTPException(status_code=400, detail="No articles selected")
+    max_selected = 10
+    if len(url_list) > max_selected:
+        raise HTTPException(status_code=400, detail=f"Select up to {max_selected} articles")
+    per_article_limit = 7000
+    overall_limit = 25000
+    with Session(engine) as session:
+        settings = get_settings(session)
+        cached_by_link = {a.link: a for a in session.exec(select(CachedArticle).where(CachedArticle.link.in_(url_list))).all()}
+    article_chunks = []
+    remaining = overall_limit
+    for idx, link in enumerate(url_list, start=1):
+        cached = cached_by_link.get(link)
+        title = (cached.title if cached else None) or f"Article {idx}"
+        try:
+            if scrape_before:
+                content_html = scrape_article_html(link)
+                text = html_to_plain_text(content_html)
+            else:
+                if not cached:
+                    continue
+                text = html_to_plain_text(cached.display_body)
+        except Exception as e:
+            if cached:
+                text = html_to_plain_text(cached.display_body)
+            else:
+                continue
+        text = truncate_text(text, per_article_limit).strip()
+        if len(text) < 20:
+            continue
+        chunk = f"Article {idx}: {title}\nURL: {link}\n\n{text}"
+        if len(chunk) > remaining:
+            chunk = truncate_text(chunk, remaining).strip()
+        article_chunks.append(chunk)
+        remaining -= len(chunk)
+        if remaining <= 0:
+            break
+    if not article_chunks:
+        raise HTTPException(status_code=400, detail="Could not extract text from selected articles")
+    combined_text = truncate_text("\n\n---\n\n".join(article_chunks), overall_limit)
+    system_prompt = (
+        "You are an expert AI reading assistant. You will be given multiple articles. "
+        "Create a single combined summary. Include: (1) a short combined overview of key themes, "
+        "(2) a per-article set of key takeaways, and (3) any cross-article connections or notable differences. "
+        "Format your response in clean HTML using <p>, <ul>, <li>, and <strong> tags. "
+        "Do not include markdown code block syntax (like ```html)."
+    )
+    try:
+        summary_html = call_llm(settings, f"Summarize these articles together:\n\n{combined_text}", system_prompt)
+        summary_html = summary_html.replace("```html", "").replace("```", "").strip()
+        return {"summary": summary_html}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/reader/fetch_content")
+async def api_fetch_content(request: Request):
+    data = await request.json()
+    url = data.get("url", "")
+    try:
+        # Check for cached scraped content first
+        with Session(engine) as session:
+            article = session.exec(select(CachedArticle).where(CachedArticle.link == url)).first()
+            if article and article.scraped_content:
+                logger.info(f"[Reader] Using cached scraped content for: {url}")
+                return {"html": article.scraped_content}
+
+        # Not cached — scrape and save
+        content = scrape_article_html(url)
+        with Session(engine) as session:
+            article = session.exec(select(CachedArticle).where(CachedArticle.link == url)).first()
+            if article and not article.scraped_content:
+                article.scraped_content = content
+                session.add(article)
+                session.commit()
+        return {"html": content}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+@app.post("/api/reader/force_sync")
+def api_force_sync():
+    from threading import Thread
+    Thread(target=sync_all_feeds).start()
+    return {"ok": True}
+
+
+# --- Feed-level operations ---
+
+@app.post("/api/feeds/{feed_id}/mark_read")
+def api_mark_feed_read(feed_id: str):
+    with Session(engine) as session:
+        read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
+        articles = session.exec(select(CachedArticle).where(CachedArticle.feed_id == feed_id)).all()
+        new_reads = [ReadItem(item_link=a.link) for a in articles if a.link not in read_links]
+        if new_reads:
+            session.add_all(new_reads)
+            session.commit()
+    return Response(status_code=204)
+
+@app.post("/api/feeds/{feed_id}/toggle_scrape")
+def api_toggle_feed_scrape(feed_id: int):
+    with Session(engine) as session:
+        feed = session.get(Feed, feed_id)
+        if not feed:
+            raise HTTPException(status_code=404)
+        feed.auto_scrape = not feed.auto_scrape
+        session.add(feed)
+        session.commit()
+        return {"id": feed.id, "auto_scrape": feed.auto_scrape}
+
+@app.delete("/api/feeds/{feed_id}")
+def api_delete_feed(feed_id: int):
+    with Session(engine) as session:
+        feed = session.get(Feed, feed_id)
+        if feed:
+            session.delete(feed)
+            session.commit()
+    return Response(status_code=204)
+
+
+# --- Collections ---
+
+@app.get("/api/collections")
+def api_list_collections():
+    with Session(engine) as session:
+        collections = session.exec(select(Collection)).all()
+        result = []
+        for col in collections:
+            status_text = "Pending"
+            status_type = "pending"
+            if col.is_generating:
+                status_text = "Generating..."
+                status_type = "generating"
+            elif col.last_run:
+                status_text = col.last_run.strftime('%d %b %H:%M')
+                status_type = "done"
+            kw_list = [k.strip() for k in (col.focus_keywords or "").split(",") if k.strip()]
+            result.append({
+                "id": col.id,
+                "name": col.name,
+                "slug": col.slug,
+                "schedule_time": col.schedule_time,
+                "last_run": col.last_run.isoformat() if col.last_run else None,
+                "is_generating": col.is_generating,
+                "is_active": col.is_active,
+                "category_id": col.category_id,
+                "focus_keywords": col.focus_keywords,
+                "keywords_list": kw_list,
+                "context_length": col.context_length,
+                "filter_max_articles": col.filter_max_articles,
+                "filter_age": col.filter_age,
+                "max_articles_per_topic": col.max_articles_per_topic,
+                "rag_top_k": col.rag_top_k,
+                "rag_min_similarity": col.rag_min_similarity,
+                "rag_eviction_days": col.rag_eviction_days,
+                "system_prompt": col.system_prompt,
+                "status_text": status_text,
+                "status_type": status_type,
+            })
+        return result
+
+@app.get("/api/collections/{cid}")
+def api_get_collection(cid: int):
+    with Session(engine) as session:
+        col = session.get(Collection, cid)
+        if not col:
+            raise HTTPException(status_code=404)
+        feeds = [{"id": f.id, "url": f.url, "auto_scrape": f.auto_scrape} for f in col.feeds]
+        return {
+            "id": col.id, "name": col.name, "slug": col.slug,
+            "schedule_time": col.schedule_time,
+            "last_run": col.last_run.isoformat() if col.last_run else None,
+            "is_generating": col.is_generating, "is_active": col.is_active,
+            "category_id": col.category_id, "focus_keywords": col.focus_keywords,
+            "context_length": col.context_length, "filter_max_articles": col.filter_max_articles,
+            "filter_age": col.filter_age, "max_articles_per_topic": col.max_articles_per_topic,
+            "rag_top_k": col.rag_top_k, "rag_min_similarity": col.rag_min_similarity,
+            "rag_eviction_days": col.rag_eviction_days, "system_prompt": col.system_prompt,
+            "feeds": feeds,
+        }
+
+@app.post("/api/collections")
+async def api_create_collection(request: Request):
+    data = await request.json()
+    name = data.get("name", "").strip()
+    slug = _sanitize_slug(data.get("slug", "").strip())
+    category_id_raw = data.get("category_id")
+    cat_id = int(category_id_raw) if category_id_raw and str(category_id_raw).isdigit() else None
+    if not name or not slug:
+        raise HTTPException(status_code=400, detail="Name and slug required")
+    with Session(engine) as session:
+        if session.exec(select(Collection).where(Collection.slug == slug)).first():
+            raise HTTPException(status_code=400, detail="Slug already exists")
+        g = get_settings(session)
+        col = Collection(
+            name=name, slug=slug, schedule_time=g.default_schedule,
+            context_length=g.default_context_length, filter_max_articles=g.default_filter_max,
+            filter_age=g.default_filter_age, system_prompt=g.default_system_prompt,
+            category_id=cat_id, focus_keywords=g.default_focus_keywords or ""
+        )
+        session.add(col)
+        session.commit()
+        session.refresh(col)
+        return {"id": col.id, "name": col.name, "slug": col.slug}
+
+@app.patch("/api/collections/{cid}")
+async def api_update_collection(cid: int, request: Request):
+    data = await request.json()
+    name = data.get("name", "").strip()
+    slug = _sanitize_slug(data.get("slug", "").strip())
+    category_id_raw = data.get("category_id")
+    cat_id = int(category_id_raw) if category_id_raw and str(category_id_raw).isdigit() else None
+    if not name or not slug:
+        raise HTTPException(status_code=400, detail="Name and slug required")
+    with Session(engine) as session:
+        col = session.get(Collection, cid)
+        if not col:
+            raise HTTPException(status_code=404)
+        old_slug = col.slug
+        if slug != old_slug:
+            if session.exec(select(Collection).where(Collection.slug == slug)).first():
+                raise HTTPException(status_code=400, detail="Slug taken")
+            if os.path.exists(f"/app/data/feeds/{old_slug}.xml"):
+                os.rename(f"/app/data/feeds/{old_slug}.xml", f"/app/data/feeds/{slug}.xml")
+        col.name = name
+        col.slug = slug
+        col.category_id = cat_id
+        session.add(col)
+        session.commit()
+        return {"id": col.id, "name": col.name, "slug": col.slug, "category_id": col.category_id}
+
+@app.delete("/api/collections/{cid}")
+def api_delete_collection(cid: int):
+    with Session(engine) as session:
+        col = session.get(Collection, cid)
+        if col:
+            if os.path.exists(f"/app/data/feeds/{col.slug}.xml"):
+                os.remove(f"/app/data/feeds/{col.slug}.xml")
+            for feed in col.feeds:
+                session.delete(feed)
+            session.delete(col)
+            session.commit()
+    return Response(status_code=204)
+
+@app.get("/api/collections/{cid}/feeds")
+def api_get_collection_feeds(cid: int):
+    with Session(engine) as session:
+        col = session.get(Collection, cid)
+        if not col:
+            raise HTTPException(status_code=404)
+        return [{"id": f.id, "url": f.url, "auto_scrape": f.auto_scrape} for f in col.feeds]
+
+@app.post("/api/collections/{cid}/feeds")
+async def api_add_collection_feed(cid: int, request: Request):
+    data = await request.json()
+    url = data.get("url", "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL required")
+    with Session(engine) as session:
+        if session.exec(select(Feed).where(Feed.collection_id == cid, Feed.url == url)).first():
+            raise HTTPException(status_code=409, detail="Feed already in collection")
+        feed = Feed(url=url, collection_id=cid)
+        session.add(feed)
+        session.commit()
+        session.refresh(feed)
+        return {"id": feed.id, "url": feed.url, "auto_scrape": feed.auto_scrape}
+
+@app.post("/api/collections/{cid}/trigger")
+def api_trigger_collection(cid: int):
+    from threading import Thread
+    t = Thread(target=generate_digest_for_collection, args=(cid,))
+    t.start()
+    return {"ok": True}
+
+@app.post("/api/collections/trigger_all")
+def api_trigger_all_collections():
+    from threading import Thread
+    def run_all():
+        with Session(engine) as session:
+            cids = [c.id for c in session.exec(select(Collection).where(Collection.is_active == True)).all()]
+        for cid in cids:
+            try:
+                generate_digest_for_collection(cid)
+            except:
+                pass
+    Thread(target=run_all).start()
+    return {"ok": True}
+
+@app.post("/api/collections/{cid}/update_settings")
+async def api_update_collection_settings(cid: int, request: Request):
+    data = await request.json()
+    with Session(engine) as session:
+        col = session.get(Collection, cid)
+        if not col:
+            raise HTTPException(status_code=404)
+        col.schedule_time = data.get("schedule_time", col.schedule_time)
+        col.context_length = int(data.get("context_length", col.context_length))
+        col.filter_max_articles = int(data.get("filter_max_articles", col.filter_max_articles))
+        col.filter_age = data.get("filter_age", col.filter_age)
+        col.max_articles_per_topic = int(data.get("max_articles_per_topic", col.max_articles_per_topic))
+        col.focus_keywords = data.get("focus_keywords", col.focus_keywords)
+        col.rag_top_k = int(data.get("rag_top_k", col.rag_top_k))
+        col.rag_min_similarity = float(data.get("rag_min_similarity", col.rag_min_similarity))
+        col.rag_eviction_days = int(data.get("rag_eviction_days", col.rag_eviction_days))
+        session.add(col)
+        session.commit()
+    return {"ok": True}
+
+@app.post("/api/collections/{cid}/update_prompt")
+async def api_update_collection_prompt(cid: int, request: Request):
+    data = await request.json()
+    system_prompt = data.get("system_prompt", "")
+    with Session(engine) as session:
+        col = session.get(Collection, cid)
+        if not col:
+            raise HTTPException(status_code=404)
+        col.system_prompt = system_prompt
+        session.add(col)
+        session.commit()
+    return {"ok": True}
+
+@app.post("/api/collections/{cid}/toggle_active")
+def api_toggle_collection_active(cid: int):
+    with Session(engine) as session:
+        col = session.get(Collection, cid)
+        if not col:
+            raise HTTPException(status_code=404)
+        col.is_active = not col.is_active
+        session.add(col)
+        session.commit()
+        return {"id": col.id, "is_active": col.is_active}
+
+@app.get("/api/collections/{cid}/export.opml")
+def api_export_collection_opml(cid: int):
+    return export_opml(cid)
+
+@app.post("/api/collections/{cid}/import_opml")
+async def api_import_collection_opml(cid: int, file: UploadFile = File(...)):
+    content_bytes = await file.read()
+    try:
+        content_str = content_bytes.decode("utf-8")
+    except:
+        content_str = content_bytes.decode("latin-1")
+    content_str = re.sub(r'&(?!(?:[a-zA-Z][a-zA-Z0-9]*|#[0-9]+);)', '&amp;', content_str)
+    try:
+        root = ET.fromstring(content_str)
+        urls = [elem.get('xmlUrl') or elem.get('url') for elem in root.iter() if elem.tag.endswith('outline')]
+        urls = [u for u in urls if u]
+        with Session(engine) as session:
+            for url in urls:
+                if not session.exec(select(Feed).where(Feed.collection_id == cid, Feed.url == url)).first():
+                    session.add(Feed(url=url, collection_id=cid))
+            session.commit()
+            col = session.get(Collection, cid)
+            feeds = [{"id": f.id, "url": f.url, "auto_scrape": f.auto_scrape} for f in col.feeds]
+        return {"imported": len(urls), "feeds": feeds}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# --- Settings ---
+
+@app.get("/api/settings")
+def api_get_settings():
+    with Session(engine) as session:
+        s = get_settings(session)
+        return {
+            "api_endpoint": s.api_endpoint,
+            "api_key_is_set": bool(s.api_key),
+            "model_name": s.model_name,
+            "default_schedule": s.default_schedule,
+            "default_context_length": s.default_context_length,
+            "default_filter_max": s.default_filter_max,
+            "default_filter_age": s.default_filter_age,
+            "default_system_prompt": s.default_system_prompt,
+            "default_focus_keywords": s.default_focus_keywords,
+            "retention_read_days": s.retention_read_days,
+            "retention_unread_days": s.retention_unread_days,
+            "reader_font_family": s.reader_font_family,
+            "reader_font_size": s.reader_font_size,
+            "reader_line_height": s.reader_line_height,
+            "pwa_offline_limit": s.pwa_offline_limit,
+            "demo_mode": DEMO_MODE,
+            "ui_theme": s.ui_theme,
+        }
+
+@app.post("/api/settings/update")
+async def api_update_settings(request: Request):
+    data = await request.json()
+    with Session(engine) as session:
+        settings = get_settings(session)
+        settings.api_type = "openai"
+        if not DEMO_MODE:
+            if data.get("api_endpoint") is not None:
+                settings.api_endpoint = data["api_endpoint"]
+            if data.get("api_key"):
+                settings.api_key = data["api_key"]
+            if data.get("model_name") is not None:
+                settings.model_name = clean_model_id(data["model_name"])
+        if data.get("ui_theme") in ("default", "dark", "light", "sepia"):
+            settings.ui_theme = data["ui_theme"]
+        for field in ["default_schedule", "default_filter_age", "default_system_prompt", "default_focus_keywords"]:
+            if data.get(field) is not None:
+                setattr(settings, field, data[field])
+        for css_field in ["reader_font_family", "reader_font_size", "reader_line_height"]:
+            if data.get(css_field) is not None:
+                setattr(settings, css_field, _sanitize_css_value(data[css_field]))
+        for int_field in ["default_context_length", "default_filter_max", "retention_read_days", "retention_unread_days", "pwa_offline_limit"]:
+            if data.get(int_field) is not None:
+                try:
+                    setattr(settings, int_field, int(data[int_field]))
+                except (ValueError, TypeError):
+                    pass
+        session.add(settings)
+        session.commit()
+    return {"ok": True}
+
+@app.post("/api/settings/test_llm")
+async def api_test_llm(request: Request):
+    if DEMO_MODE:
+        raise HTTPException(status_code=403, detail="Connection testing disabled in demo mode")
+    data = await request.json()
+    with Session(engine) as session:
+        settings = get_settings(session)
+        if data.get("api_endpoint"):
+            settings.api_endpoint = data["api_endpoint"]
+        if data.get("api_key"):
+            settings.api_key = data["api_key"]
+        if data.get("model_name"):
+            settings.model_name = data["model_name"]
+    try:
+        res = call_llm(settings, "Reply with 'Connection successful!' and nothing else.", "You are a helpful assistant.")
+        return {"ok": True, "message": res}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+@app.get("/api/settings/backup")
+def api_backup_database():
+    return backup_database()
+
+@app.post("/api/settings/restore")
+async def api_restore_database(file: UploadFile = File(...)):
+    if DEMO_MODE:
+        raise HTTPException(status_code=403, detail="Restore disabled in demo mode")
+    content = await file.read()
+    with open(DB_FILE, "wb") as f:
+        f.write(content)
+    return {"ok": True, "message": "Database restored. Please restart the container."}
 
