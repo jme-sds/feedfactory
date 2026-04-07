@@ -5,21 +5,19 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build-and-push:
+  build-backend:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write # Grant write permissions for packages (GHCR)
+      packages: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Required for multi-architecture builds (e.g., for Raspberry Pi/Orange Pi)
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      # Required for the registry caching backend you are using
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -27,25 +25,62 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }} 
-          password: ${{ secrets.GITHUB_TOKEN }} 
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
+      - name: Extract metadata for backend
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # Note: Ensure your repository name doesn't contain uppercase letters, 
-          # otherwise hardcode the lowercase name here.
           images: ghcr.io/${{ github.repository }}
 
-      - name: Build and push Docker image
+      - name: Build and push backend image
         uses: docker/build-push-action@v5
         with:
-          context: . 
+          context: .
           push: true
-          platforms: linux/amd64,linux/arm64 # Added multi-arch support
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
 
+  build-frontend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for frontend
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-frontend
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}-frontend:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}-frontend:buildcache,mode=max
