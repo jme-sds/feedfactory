@@ -56,24 +56,10 @@ export const useReaderStore = create<ReaderState>((set, get) => ({
   },
 
   selectArticle: (article) => {
-    // Optimistically mark as read in store state so the toggle reflects it immediately
-    const withRead = article ? { ...article, is_read: true } : null;
     set({
-      selectedArticle: withRead,
+      selectedArticle: article,
       mobileView: article ? "article" : "stream",
     });
-    // Fire API call only when transitioning from unread
-    if (article && !article.is_read) {
-      fetch("/api/articles/mark_read", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token": getCsrfToken(),
-        },
-        credentials: "include",
-        body: JSON.stringify({ url: article.link }),
-      }).catch(() => {});
-    }
   },
 
   goBack: () => {

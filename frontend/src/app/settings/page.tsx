@@ -9,11 +9,46 @@ import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/api";
 
+function Section({
+  id,
+  title,
+  openSection,
+  setOpenSection,
+  children,
+}: {
+  id: string;
+  title: string;
+  openSection: string;
+  setOpenSection: (id: string) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="border border-border rounded-xl overflow-hidden">
+      <button
+        onClick={() => setOpenSection(openSection === id ? "" : id)}
+        className="w-full flex items-center justify-between px-4 py-3.5 bg-surface hover:bg-white/5 transition-colors text-left"
+      >
+        <span className="font-medium text-sm">{title}</span>
+        {openSection === id ? <ChevronDown size={16} className="text-muted" /> : <ChevronRight size={16} className="text-muted" />}
+      </button>
+      {openSection === id && (
+        <div className="px-4 py-4 space-y-4 border-t border-border bg-background/50">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const qc = useQueryClient();
   const router = useRouter();
   const [openSection, setOpenSection] = useState<string>("ai");
-  const [form, setForm] = useState<Partial<Settings> & { api_key?: string; ui_theme?: string }>({});
+  type CustomColors = { background: string; surface: string; border: string; primary: string; muted: string; fg: string };
+  const DEFAULT_CUSTOM_COLORS: CustomColors = { background: "#141414", surface: "#1e1e1e", border: "#333333", primary: "#1095c1", muted: "#888888", fg: "#ffffff" };
+  const [form, setForm] = useState<Partial<Settings> & { api_key?: string; ui_theme?: string; ui_accent?: string; ui_custom_colors?: string }>({});
+  const [customColors, setCustomColors] = useState<CustomColors>(DEFAULT_CUSTOM_COLORS);
+  const [typographyTab, setTypographyTab] = useState<"desktop" | "mobile">("desktop");
   const [saved, setSaved] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -46,9 +81,24 @@ export default function SettingsPage() {
         reader_font_family: currentSettings.reader_font_family,
         reader_font_size: currentSettings.reader_font_size,
         reader_line_height: currentSettings.reader_line_height,
+        reader_font_family_mobile: currentSettings.reader_font_family_mobile,
+        reader_font_size_mobile: currentSettings.reader_font_size_mobile,
+        reader_line_height_mobile: currentSettings.reader_line_height_mobile,
         pwa_offline_limit: currentSettings.pwa_offline_limit,
         ui_theme: currentSettings.ui_theme || "default",
+        ui_accent: currentSettings.ui_accent || "",
+        ui_custom_colors: currentSettings.ui_custom_colors || "",
+        default_hdbscan_min_cluster_size: currentSettings.default_hdbscan_min_cluster_size ?? 3,
+        default_hdbscan_min_samples: currentSettings.default_hdbscan_min_samples ?? 0,
+        default_hdbscan_cluster_selection_epsilon: currentSettings.default_hdbscan_cluster_selection_epsilon ?? 0,
+        default_hdbscan_cluster_selection_method: currentSettings.default_hdbscan_cluster_selection_method || "eom",
       });
+      if (currentSettings.ui_custom_colors) {
+        try {
+          const parsed = JSON.parse(currentSettings.ui_custom_colors);
+          setCustomColors((prev) => ({ ...prev, ...parsed }));
+        } catch {}
+      }
     }
   }, [currentSettings]);
 
@@ -101,28 +151,70 @@ export default function SettingsPage() {
     setForm((f) => ({ ...f, ui_theme: theme }));
     document.documentElement.setAttribute("data-theme", theme);
     try { localStorage.setItem("ff_theme", theme); } catch {}
+    settings.update({ ui_theme: theme }).catch(() => {});
   };
+
+  const applyAccentToDOM = (hex: string) => {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    document.documentElement.style.setProperty("--primary", `${r} ${g} ${b}`);
+    document.documentElement.style.setProperty("--primary-hover", `${Math.round(r * 0.82)} ${Math.round(g * 0.82)} ${Math.round(b * 0.82)}`);
+  };
+
+  const selectAccent = (hex: string) => {
+    setForm((f) => ({ ...f, ui_accent: hex }));
+    applyAccentToDOM(hex);
+    try { localStorage.setItem("ff_accent", hex); } catch {}
+    settings.update({ ui_accent: hex }).catch(() => {});
+  };
+
+  const hexToRgbStr = (hex: string) => {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `${r} ${g} ${b}`;
+  };
+
+  const applyCustomColorsToDOM = (colors: CustomColors) => {
+    const map: Record<string, string> = {
+      background: "--background", surface: "--surface", border: "--border",
+      primary: "--primary", muted: "--muted", fg: "--fg",
+    };
+    for (const [key, prop] of Object.entries(map)) {
+      document.documentElement.style.setProperty(prop, hexToRgbStr(colors[key as keyof CustomColors]));
+    }
+    const { r, g, b } = { r: parseInt(colors.primary.slice(1,3),16), g: parseInt(colors.primary.slice(3,5),16), b: parseInt(colors.primary.slice(5,7),16) };
+    document.documentElement.style.setProperty("--primary-hover", `${Math.round(r*.82)} ${Math.round(g*.82)} ${Math.round(b*.82)}`);
+  };
+
+  const updateCustomColor = (key: keyof CustomColors, hex: string) => {
+    const next = { ...customColors, [key]: hex };
+    setCustomColors(next);
+    const json = JSON.stringify(next);
+    setForm((f) => ({ ...f, ui_custom_colors: json }));
+    applyCustomColorsToDOM(next);
+    try { localStorage.setItem("ff_custom_colors", json); } catch {}
+    settings.update({ ui_custom_colors: json }).catch(() => {});
+  };
+
+  const ACCENT_PRESETS = [
+    { hex: "#1095c1", label: "Ocean" },
+    { hex: "#3b82f6", label: "Blue" },
+    { hex: "#6366f1", label: "Indigo" },
+    { hex: "#8b5cf6", label: "Violet" },
+    { hex: "#ec4899", label: "Rose" },
+    { hex: "#ef4444", label: "Red" },
+    { hex: "#f97316", label: "Orange" },
+    { hex: "#eab308", label: "Amber" },
+    { hex: "#22c55e", label: "Green" },
+    { hex: "#14b8a6", label: "Teal" },
+  ] as const;
 
   const inputClass = "w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors";
   const labelClass = "block text-xs text-muted mb-1.5";
   const demoMode = currentSettings?.demo_mode;
 
-  const Section = ({ id, title, children }: { id: string; title: string; children: React.ReactNode }) => (
-    <div className="border border-border rounded-xl overflow-hidden">
-      <button
-        onClick={() => setOpenSection(openSection === id ? "" : id)}
-        className="w-full flex items-center justify-between px-4 py-3.5 bg-surface hover:bg-white/5 transition-colors text-left"
-      >
-        <span className="font-medium text-sm">{title}</span>
-        {openSection === id ? <ChevronDown size={16} className="text-muted" /> : <ChevronRight size={16} className="text-muted" />}
-      </button>
-      {openSection === id && (
-        <div className="px-4 py-4 space-y-4 border-t border-border bg-background/50">
-          {children}
-        </div>
-      )}
-    </div>
-  );
 
   if (isLoading) {
     return (
@@ -153,7 +245,7 @@ export default function SettingsPage() {
 
         <div className="space-y-3">
           {/* AI Provider */}
-          <Section id="ai" title="AI Provider (OpenAI Compatible)">
+          <Section id="ai" title="AI Provider (OpenAI Compatible)" openSection={openSection} setOpenSection={setOpenSection}>
             {demoMode && (
               <p className="text-xs text-warning bg-warning/10 border border-warning/30 rounded-lg px-3 py-2">
                 AI provider settings are locked in demo mode.
@@ -186,7 +278,7 @@ export default function SettingsPage() {
           </Section>
 
           {/* Auto-Cleanup */}
-          <Section id="cleanup" title="Reader Auto-Cleanup">
+          <Section id="cleanup" title="Reader Auto-Cleanup" openSection={openSection} setOpenSection={setOpenSection}>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className={labelClass}>Keep Read Articles (days)</label>
@@ -200,7 +292,7 @@ export default function SettingsPage() {
           </Section>
 
           {/* Collection Defaults */}
-          <Section id="defaults" title="Collection Defaults">
+          <Section id="defaults" title="Collection Defaults" openSection={openSection} setOpenSection={setOpenSection}>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className={labelClass}>Default Schedule</label>
@@ -231,73 +323,306 @@ export default function SettingsPage() {
               <label className={labelClass}>Default System Prompt</label>
               <textarea value={form.default_system_prompt || ""} onChange={set("default_system_prompt")} rows={6} className={`${inputClass} resize-none font-mono text-xs`} />
             </div>
+            <div>
+              <label className={labelClass}>Default Clustering (HDBSCAN)</label>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-muted/70 block mb-1">Min Cluster Size</label>
+                  <input type="number" min="2" value={form.default_hdbscan_min_cluster_size ?? 3} onChange={set("default_hdbscan_min_cluster_size")} className={inputClass} />
+                </div>
+                <div>
+                  <label className="text-xs text-muted/70 block mb-1">Min Samples (0 = auto)</label>
+                  <input type="number" min="0" value={form.default_hdbscan_min_samples ?? 0} onChange={set("default_hdbscan_min_samples")} className={inputClass} />
+                </div>
+                <div>
+                  <label className="text-xs text-muted/70 block mb-1">Selection Epsilon</label>
+                  <input type="number" min="0" step="0.05" value={form.default_hdbscan_cluster_selection_epsilon ?? 0} onChange={set("default_hdbscan_cluster_selection_epsilon")} className={inputClass} />
+                </div>
+                <div>
+                  <label className="text-xs text-muted/70 block mb-1">Selection Method</label>
+                  <select value={form.default_hdbscan_cluster_selection_method || "eom"} onChange={set("default_hdbscan_cluster_selection_method")} className={inputClass}>
+                    <option value="eom">EOM (variable size)</option>
+                    <option value="leaf">Leaf (uniform size)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
           </Section>
 
           {/* Typography */}
-          <Section id="typography" title="Reader Typography">
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <label className={labelClass}>Font Family</label>
-                <input type="text" value={form.reader_font_family || ""} onChange={set("reader_font_family")} className={inputClass} placeholder="system-ui, sans-serif" />
-              </div>
-              <div>
-                <label className={labelClass}>Font Size</label>
-                <input type="text" value={form.reader_font_size || ""} onChange={set("reader_font_size")} className={inputClass} placeholder="1.15rem" />
-              </div>
-              <div>
-                <label className={labelClass}>Line Height</label>
-                <input type="text" value={form.reader_line_height || ""} onChange={set("reader_line_height")} className={inputClass} placeholder="1.7" />
-              </div>
+          <Section id="typography" title="Reader Typography" openSection={openSection} setOpenSection={setOpenSection}>
+            {/* Desktop / Mobile tab switcher */}
+            <div className="flex gap-1 p-1 bg-surface rounded-lg w-fit">
+              {(["desktop", "mobile"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setTypographyTab(tab)}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-colors capitalize ${
+                    typographyTab === tab
+                      ? "bg-primary text-white"
+                      : "text-muted hover:text-white"
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
             </div>
-            {form.reader_font_family && (
-              <div
-                className="p-3 bg-background border border-border rounded-lg text-sm"
-                style={{
-                  fontFamily: form.reader_font_family,
-                  fontSize: form.reader_font_size || "1.15rem",
-                  lineHeight: form.reader_line_height || "1.7",
-                }}
-              >
-                Preview: The quick brown fox jumps over the lazy dog.
-              </div>
+
+            {typographyTab === "desktop" ? (
+              <>
+                <p className="text-xs text-muted">Applied on screens 1024 px and wider.</p>
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className={labelClass}>Font Family</label>
+                    <input type="text" value={form.reader_font_family || ""} onChange={set("reader_font_family")} className={inputClass} placeholder="system-ui, sans-serif" />
+                  </div>
+                  <div>
+                    <label className={labelClass}>Font Size</label>
+                    <input type="text" value={form.reader_font_size || ""} onChange={set("reader_font_size")} className={inputClass} placeholder="1.15rem" />
+                  </div>
+                  <div>
+                    <label className={labelClass}>Line Height</label>
+                    <input type="text" value={form.reader_line_height || ""} onChange={set("reader_line_height")} className={inputClass} placeholder="1.7" />
+                  </div>
+                </div>
+                <div
+                  className="p-3 bg-background border border-border rounded-lg text-sm"
+                  style={{
+                    fontFamily: form.reader_font_family || "system-ui, -apple-system, sans-serif",
+                    fontSize: form.reader_font_size || "1.15rem",
+                    lineHeight: form.reader_line_height || "1.7",
+                  }}
+                >
+                  Preview: The quick brown fox jumps over the lazy dog.
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-muted">Applied on screens narrower than 1024 px. Leave blank to inherit desktop settings.</p>
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className={labelClass}>Font Family</label>
+                    <input type="text" value={form.reader_font_family_mobile || ""} onChange={set("reader_font_family_mobile")} className={inputClass} placeholder={form.reader_font_family || "inherited"} />
+                  </div>
+                  <div>
+                    <label className={labelClass}>Font Size</label>
+                    <input type="text" value={form.reader_font_size_mobile || ""} onChange={set("reader_font_size_mobile")} className={inputClass} placeholder={form.reader_font_size || "inherited"} />
+                  </div>
+                  <div>
+                    <label className={labelClass}>Line Height</label>
+                    <input type="text" value={form.reader_line_height_mobile || ""} onChange={set("reader_line_height_mobile")} className={inputClass} placeholder={form.reader_line_height || "inherited"} />
+                  </div>
+                </div>
+                <div
+                  className="p-3 bg-background border border-border rounded-lg text-sm"
+                  style={{
+                    fontFamily: form.reader_font_family_mobile || form.reader_font_family || "system-ui, -apple-system, sans-serif",
+                    fontSize: form.reader_font_size_mobile || form.reader_font_size || "1.15rem",
+                    lineHeight: form.reader_line_height_mobile || form.reader_line_height || "1.7",
+                  }}
+                >
+                  Preview: The quick brown fox jumps over the lazy dog.
+                </div>
+              </>
             )}
           </Section>
 
           {/* Appearance / Theme */}
-          <Section id="appearance" title="Appearance">
-            <p className="text-xs text-muted">Choose a color scheme. Changes apply immediately.</p>
-            <div className="grid grid-cols-2 gap-3">
-              {([
-                { id: "default", label: "Default",  sub: "Current dark",    bg: "#141414", border: "#444",    text: "#fff" },
-                { id: "dark",    label: "Dark",      sub: "Deep grey",       bg: "#111111", border: "#2a2a2a", text: "#e0e0e0" },
-                { id: "light",   label: "Light",     sub: "White & blue",    bg: "#f0f6fc", border: "#d0e4ef", text: "#1a1a1a" },
-                { id: "sepia",   label: "Sepia",     sub: "Warm parchment",  bg: "#f4ecd8", border: "#c8b090", text: "#2c1a06" },
-              ] as const).map((t) => {
-                const active = (form.ui_theme || "default") === t.id;
-                return (
+          <Section id="appearance" title="Appearance" openSection={openSection} setOpenSection={setOpenSection}>
+            <div>
+              <p className={labelClass}>Color Scheme</p>
+              <p className="text-xs text-muted mb-3">Changes apply immediately.</p>
+              <div className="grid grid-cols-2 gap-3">
+                {([
+                  { id: "default", label: "Default",  sub: "Dark grey",      bg: "#141414", surface: "#1e1e1e", border: "#333333", fg: "#ffffff" },
+                  { id: "light",   label: "Light",     sub: "Bright white",   bg: "#f0f6fc", surface: "#ffffff", border: "#d0e4ef", fg: "#1a1a1a" },
+                  { id: "sepia",   label: "Sepia",     sub: "Warm parchment", bg: "#f4ecd8", surface: "#ede3c8", border: "#c8b090", fg: "#2c1a06" },
+                ] as const).map((t) => {
+                  const active = (form.ui_theme || "default") === t.id;
+                  const accent = form.ui_accent || "#1095c1";
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => selectTheme(t.id)}
+                      style={{
+                        background: t.bg,
+                        color: t.fg,
+                        borderColor: active ? accent : t.border,
+                        borderWidth: active ? 2 : 1,
+                      }}
+                      className="rounded-xl border p-3 flex flex-col gap-2 cursor-pointer transition-all text-sm font-medium text-left"
+                    >
+                      <div style={{ background: t.bg, borderRadius: 5, overflow: "hidden", height: 38, display: "flex", flexDirection: "column", border: `1px solid ${t.border}` }}>
+                        <div style={{ background: t.surface, height: 11, display: "flex", alignItems: "center", padding: "0 5px", gap: 3, borderBottom: `1px solid ${t.border}` }}>
+                          <div style={{ width: 4, height: 4, borderRadius: "50%", background: accent }} />
+                          <div style={{ flex: 1, height: 2, background: t.fg, opacity: 0.12, borderRadius: 1 }} />
+                          <div style={{ width: 12, height: 4, borderRadius: 2, background: accent, opacity: 0.8 }} />
+                        </div>
+                        <div style={{ flex: 1, display: "flex", gap: 3, padding: "3px 4px" }}>
+                          <div style={{ width: 16, background: t.surface, borderRadius: 2 }} />
+                          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", gap: 2 }}>
+                            <div style={{ height: 2, background: t.fg, opacity: 0.4, borderRadius: 1, width: "75%" }} />
+                            <div style={{ height: 2, background: t.fg, opacity: 0.2, borderRadius: 1, width: "55%" }} />
+                            <div style={{ height: 2, background: accent, opacity: 0.75, borderRadius: 1, width: "40%" }} />
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-baseline justify-between">
+                        <span>{t.label}</span>
+                        <span style={{ color: t.fg, opacity: 0.5 }} className="text-xs font-normal">{t.sub}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+
+                {/* Custom theme card */}
+                {(() => {
+                  const active = (form.ui_theme || "default") === "custom";
+                  const cc = customColors;
+                  const accent = cc.primary;
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        selectTheme("custom");
+                        applyCustomColorsToDOM(cc);
+                      }}
+                      style={{
+                        background: cc.background,
+                        color: cc.fg,
+                        borderColor: active ? accent : cc.border,
+                        borderWidth: active ? 2 : 1,
+                      }}
+                      className="rounded-xl border p-3 flex flex-col gap-2 cursor-pointer transition-all text-sm font-medium text-left"
+                    >
+                      <div style={{ background: cc.background, borderRadius: 5, overflow: "hidden", height: 38, display: "flex", flexDirection: "column", border: `1px solid ${cc.border}` }}>
+                        <div style={{ background: cc.surface, height: 11, display: "flex", alignItems: "center", padding: "0 5px", gap: 3, borderBottom: `1px solid ${cc.border}` }}>
+                          <div style={{ width: 4, height: 4, borderRadius: "50%", background: accent }} />
+                          <div style={{ flex: 1, height: 2, background: cc.fg, opacity: 0.12, borderRadius: 1 }} />
+                          <div style={{ width: 12, height: 4, borderRadius: 2, background: accent, opacity: 0.8 }} />
+                        </div>
+                        <div style={{ flex: 1, display: "flex", gap: 3, padding: "3px 4px" }}>
+                          <div style={{ width: 16, background: cc.surface, borderRadius: 2 }} />
+                          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", gap: 2 }}>
+                            <div style={{ height: 2, background: cc.fg, opacity: 0.4, borderRadius: 1, width: "75%" }} />
+                            <div style={{ height: 2, background: cc.fg, opacity: 0.2, borderRadius: 1, width: "55%" }} />
+                            <div style={{ height: 2, background: accent, opacity: 0.75, borderRadius: 1, width: "40%" }} />
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-baseline justify-between">
+                        <span>Custom</span>
+                        <span style={{ color: cc.fg, opacity: 0.5 }} className="text-xs font-normal">Your colors</span>
+                      </div>
+                    </button>
+                  );
+                })()}
+              </div>
+
+              {/* Custom theme color editor */}
+              {(form.ui_theme || "default") === "custom" && (
+                <div className="mt-3 p-3 rounded-xl border border-border bg-surface/50 space-y-3">
+                  <p className="text-xs text-muted">Customize each color. Changes apply immediately.</p>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                    {(
+                      [
+                        { key: "background", label: "Background" },
+                        { key: "surface",    label: "Surface" },
+                        { key: "border",     label: "Border" },
+                        { key: "primary",    label: "Primary / Accent" },
+                        { key: "muted",      label: "Muted text" },
+                        { key: "fg",         label: "Foreground text" },
+                      ] as { key: keyof CustomColors; label: string }[]
+                    ).map(({ key, label }) => (
+                      <div key={key} className="flex items-center gap-2">
+                        <label
+                          title={label}
+                          style={{ position: "relative", flexShrink: 0, cursor: "pointer" }}
+                          className="w-8 h-8 rounded-lg border border-border overflow-hidden"
+                        >
+                          <div style={{ width: "100%", height: "100%", background: customColors[key] }} />
+                          <input
+                            type="color"
+                            value={customColors[key]}
+                            onChange={(e) => updateCustomColor(key, e.target.value)}
+                            style={{ position: "absolute", inset: 0, opacity: 0, width: "100%", height: "100%", cursor: "pointer" }}
+                          />
+                        </label>
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-xs font-medium truncate">{label}</span>
+                          <span className="text-xs text-muted font-mono">{customColors[key]}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                   <button
-                    key={t.id}
                     type="button"
-                    onClick={() => selectTheme(t.id)}
-                    style={{
-                      background: t.bg,
-                      color: t.text,
-                      borderColor: active ? (t.id === "light" ? "#0d7ea8" : t.id === "sepia" ? "#9a5e2a" : "#1095c1") : t.border,
-                      borderWidth: active ? 2 : 1,
+                    onClick={() => {
+                      setCustomColors(DEFAULT_CUSTOM_COLORS);
+                      const json = JSON.stringify(DEFAULT_CUSTOM_COLORS);
+                      setForm((f) => ({ ...f, ui_custom_colors: json }));
+                      applyCustomColorsToDOM(DEFAULT_CUSTOM_COLORS);
+                      try { localStorage.setItem("ff_custom_colors", json); } catch {}
+                      settings.update({ ui_custom_colors: json }).catch(() => {});
                     }}
-                    className="rounded-xl border p-3 flex flex-col items-center gap-1.5 cursor-pointer transition-all text-sm font-medium"
+                    className="text-xs text-muted hover:text-fg transition-colors"
                   >
-                    <span className="text-xl">{t.id === "default" ? "🌙" : t.id === "dark" ? "⬛" : t.id === "light" ? "☀️" : "📜"}</span>
-                    {t.label}
-                    <span style={{ color: t.text, opacity: 0.6 }} className="text-xs font-normal">{t.sub}</span>
+                    Reset to defaults
                   </button>
-                );
-              })}
+                </div>
+              )}
+            </div>
+
+            {/* Accent Color */}
+            <div>
+              <p className={labelClass}>Accent Color</p>
+              <p className="text-xs text-muted mb-3">Applied to buttons, links, highlights, toggles, and unread counts.</p>
+              <div className="flex flex-wrap gap-2 items-center">
+                {ACCENT_PRESETS.map((p) => {
+                  const active = (form.ui_accent || "#1095c1") === p.hex;
+                  return (
+                    <button
+                      key={p.hex}
+                      type="button"
+                      title={p.label}
+                      onClick={() => selectAccent(p.hex)}
+                      style={{
+                        background: p.hex,
+                        width: 26,
+                        height: 26,
+                        borderRadius: "50%",
+                        outline: active ? `2px solid ${p.hex}` : "none",
+                        outlineOffset: active ? 3 : 0,
+                        transform: active ? "scale(1.15)" : "scale(1)",
+                        opacity: active ? 1 : 0.7,
+                        transition: "all 0.15s ease",
+                        flexShrink: 0,
+                      }}
+                    />
+                  );
+                })}
+                {/* Custom color */}
+                <label
+                  title="Custom color"
+                  style={{ width: 26, height: 26, flexShrink: 0, position: "relative", cursor: "pointer" }}
+                  className="rounded-full border border-border flex items-center justify-center hover:border-primary transition-colors"
+                >
+                  <span className="text-muted text-xs leading-none select-none">+</span>
+                  <input
+                    type="color"
+                    value={form.ui_accent || "#1095c1"}
+                    onChange={(e) => selectAccent(e.target.value)}
+                    style={{ position: "absolute", inset: 0, opacity: 0, width: "100%", height: "100%", cursor: "pointer" }}
+                  />
+                </label>
+              </div>
             </div>
           </Section>
 
           {/* Storage & Offline */}
-          <Section id="offline" title="Storage & Offline">
+          <Section id="offline" title="Storage & Offline" openSection={openSection} setOpenSection={setOpenSection}>
             <div>
               <label className={labelClass}>Offline Article Limit (10–1000)</label>
               <input type="number" value={form.pwa_offline_limit ?? 200} onChange={set("pwa_offline_limit")} className={inputClass} min={10} max={1000} />
@@ -306,7 +631,7 @@ export default function SettingsPage() {
 
           {/* Backup & Restore */}
           {!demoMode && (
-            <Section id="backup" title="Data Backup & Restore">
+            <Section id="backup" title="Data Backup & Restore" openSection={openSection} setOpenSection={setOpenSection}>
               <div className="flex flex-wrap gap-3">
                 <button onClick={settings.backup} className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border text-sm hover:bg-white/5 transition-colors">
                   Download Backup

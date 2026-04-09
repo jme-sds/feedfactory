@@ -2,7 +2,7 @@
 
 import { useReaderStore } from "@/lib/store";
 import { articles, type Article } from "@/lib/api";
-import { X, ExternalLink, BookOpen, Sparkles, ArrowLeft, CircleDot, CircleCheck } from "lucide-react";
+import { X, ExternalLink, BookOpen, Sparkles, ArrowLeft, CircleDot, CircleCheck, Star } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -15,26 +15,24 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
   const [summarizing, setSummarizing] = useState(false);
   const [readerMode, setReaderMode] = useState(false);
   const [localIsRead, setLocalIsRead] = useState<boolean | null>(null);
+  const [localIsFavorited, setLocalIsFavorited] = useState<boolean | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const markedReadRef = useRef(false);
 
-  // Reset when article changes; update list cache; auto-load reader for auto-scrape feeds
+  // Reset when article changes; auto-load reader for auto-scrape feeds
   useEffect(() => {
     setReaderHtml(null);
     setSummaryHtml(null);
     setReaderMode(false);
     setLocalIsRead(null);
+    setLocalIsFavorited(null);
+    markedReadRef.current = false;
 
     if (!selectedArticle) return;
 
-    // Push is_read: true into the article list cache so rows grey out immediately
-    const link = selectedArticle.link;
-    qc.setQueriesData<Article[]>({ queryKey: ["articles"] }, (old) => {
-      if (!old) return old;
-      return old.map((a) => a.link === link ? { ...a, is_read: true } : a);
-    });
-
     if (!selectedArticle.auto_scrape) return;
 
+    const link = selectedArticle.link;
     let cancelled = false;
     setLoadingReader(true);
     articles.fetchContent(link)
@@ -53,6 +51,48 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
     return () => { cancelled = true; };
   }, [selectedArticle?.link]);
 
+  // Mark article as read when user scrolls past the halfway point
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !selectedArticle || selectedArticle.is_read) return;
+
+    const doMarkRead = async () => {
+      if (markedReadRef.current) return;
+      markedReadRef.current = true;
+      const link = selectedArticle.link;
+      setLocalIsRead(true);
+      qc.setQueriesData<Article[]>({ queryKey: ["articles"] }, (old) =>
+        old ? old.map((a) => (a.link === link ? { ...a, is_read: true } : a)) : old
+      );
+      await articles.markRead(link);
+      qc.invalidateQueries({ queryKey: ["articles"] });
+      qc.invalidateQueries({ queryKey: ["categories"] });
+    };
+
+    const checkScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = el;
+      const scrollable = scrollHeight - clientHeight;
+      if (scrollable > 0 && scrollTop / scrollable >= 0.5) {
+        doMarkRead();
+      }
+    };
+
+    // For articles that fit entirely in the viewport (no scrolling needed), mark read after 3 seconds
+    let shortTimer: ReturnType<typeof setTimeout> | null = null;
+    const rafId = requestAnimationFrame(() => {
+      if (el.scrollHeight <= el.clientHeight + 10) {
+        shortTimer = setTimeout(doMarkRead, 3000);
+      }
+    });
+
+    el.addEventListener("scroll", checkScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", checkScroll);
+      cancelAnimationFrame(rafId);
+      if (shortTimer) clearTimeout(shortTimer);
+    };
+  }, [selectedArticle?.link]);
+
   if (!selectedArticle) {
     if (isModal) return null;
     return (
@@ -64,6 +104,21 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
 
   const a = selectedArticle;
   const isRead = localIsRead !== null ? localIsRead : a.is_read;
+  const isFavorited = localIsFavorited !== null ? localIsFavorited : (a.is_favorited ?? false);
+
+  const handleToggleFavorite = async () => {
+    const next = !isFavorited;
+    setLocalIsFavorited(next);
+    if (next) {
+      // Favoriting also marks unread
+      setLocalIsRead(false);
+      await articles.favorite(a.link);
+    } else {
+      await articles.unfavorite(a.link);
+    }
+    qc.invalidateQueries({ queryKey: ["articles"] });
+    qc.invalidateQueries({ queryKey: ["categories"] });
+  };
 
   const handleToggleRead = async () => {
     const next = !isRead;
@@ -130,6 +185,13 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
         >
           {isRead ? <CircleCheck size={16} /> : <CircleDot size={16} />}
         </button>
+        <button
+          onClick={handleToggleFavorite}
+          title={isFavorited ? "Remove from favorites" : "Add to favorites"}
+          className={`p-1.5 rounded-md transition-colors ${isFavorited ? "text-yellow-400 bg-yellow-400/10" : "text-muted hover:text-white hover:bg-white/5"}`}
+        >
+          <Star size={16} fill={isFavorited ? "currentColor" : "none"} />
+        </button>
         <div className="flex-1" />
         <button
           onClick={handleReaderView}
@@ -176,7 +238,7 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
         )}
 
         {/* Article body */}
-        <div className="reader-content leading-relaxed" dangerouslySetInnerHTML={{ __html: displayContent }} />
+        <div className="reader-content" dangerouslySetInnerHTML={{ __html: displayContent }} />
         </div>
       </div>
     </div>

@@ -1,0 +1,16 @@
+{
+  "name": "Feed Factory",
+  "short_name": "FeedFactory",
+  "description": "RSS feed aggregator and AI-powered news digest generator",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#141414",
+  "theme_color": "#141414",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ]
+}

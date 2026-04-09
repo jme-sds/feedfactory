@@ -26,8 +26,10 @@ async function apiFetch<T>(
   const res = await fetch(path, { ...options, headers, credentials: "include" });
 
   if (res.status === 401) {
-    // Redirect to login for auth errors
-    window.location.href = "/login";
+    // Redirect to login for auth errors (but not if already there)
+    if (!window.location.pathname.startsWith("/login")) {
+      window.location.href = "/login";
+    }
     throw new Error("Unauthorized");
   }
 
@@ -61,6 +63,8 @@ export interface CategoriesResponse {
   newest_ts_all: number;
   uncategorized_unread: number;
   has_uncategorized: boolean;
+  favorites_count: number;
+  favorites_unread: number;
 }
 
 export interface FeedItem {
@@ -93,6 +97,7 @@ export interface Article {
   source_color: string;
   is_generated: boolean;
   is_read: boolean;
+  is_favorited: boolean;
   category_id: number | null;
   auto_scrape: boolean;
   has_scraped_content: boolean;
@@ -116,6 +121,10 @@ export interface Collection {
   rag_top_k: number;
   rag_min_similarity: number;
   rag_eviction_days: number;
+  hdbscan_min_cluster_size: number;
+  hdbscan_min_samples: number;
+  hdbscan_cluster_selection_epsilon: number;
+  hdbscan_cluster_selection_method: string;
   system_prompt: string | null;
   status_text: string;
   status_type: "pending" | "generating" | "done";
@@ -143,9 +152,18 @@ export interface Settings {
   reader_font_family: string;
   reader_font_size: string;
   reader_line_height: string;
+  reader_font_family_mobile: string;
+  reader_font_size_mobile: string;
+  reader_line_height_mobile: string;
   pwa_offline_limit: number;
   demo_mode: boolean;
   ui_theme: string;
+  ui_accent?: string;
+  ui_custom_colors?: string;
+  default_hdbscan_min_cluster_size: number;
+  default_hdbscan_min_samples: number;
+  default_hdbscan_cluster_selection_epsilon: number;
+  default_hdbscan_cluster_selection_method: string;
 }
 
 export interface AuthStatus {
@@ -252,6 +270,16 @@ export const articles = {
     apiFetch<void>("/api/articles/mark_unread_bulk", {
       method: "POST",
       body: JSON.stringify({ urls }),
+    }),
+  favorite: (url: string) =>
+    apiFetch<void>("/api/articles/favorite", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
+  unfavorite: (url: string) =>
+    apiFetch<void>("/api/articles/unfavorite", {
+      method: "POST",
+      body: JSON.stringify({ url }),
     }),
   summarize: (text: string) =>
     apiFetch<{ summary: string }>("/api/articles/summarize", {

@@ -5,8 +5,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useRef } from "react";
 import { BookOpen, Layers, Settings, MoreVertical, RefreshCw, Plus, Upload, Download, X } from "lucide-react";
-import { articles, subscriptions } from "@/lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { articles, subscriptions, categories } from "@/lib/api";
+import { useQueryClient, useQuery } from "@tanstack/react-query";
 
 export default function TopBar() {
   const pathname = usePathname();
@@ -14,10 +14,16 @@ export default function TopBar() {
   const [addFeedOpen, setAddFeedOpen] = useState(false);
   const [addCategoryOpen, setAddCategoryOpen] = useState(false);
   const [feedUrl, setFeedUrl] = useState("");
+  const [feedCategoryId, setFeedCategoryId] = useState<string>("");
   const [categoryName, setCategoryName] = useState("");
   const [syncing, setSyncing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const qc = useQueryClient();
+
+  const { data: catsData } = useQuery({
+    queryKey: ["categories"],
+    queryFn: () => categories.list(),
+  });
 
   const nav = [
     { href: "/", label: "Reader", Icon: BookOpen },
@@ -43,8 +49,10 @@ export default function TopBar() {
     e.preventDefault();
     if (!feedUrl.trim()) return;
     try {
-      await subscriptions.add(feedUrl.trim());
+      const catId = feedCategoryId ? parseInt(feedCategoryId) : null;
+      await subscriptions.add(feedUrl.trim(), catId);
       setFeedUrl("");
+      setFeedCategoryId("");
       setAddFeedOpen(false);
       qc.invalidateQueries({ queryKey: ["categories"] });
     } catch (err: any) {
@@ -83,8 +91,8 @@ export default function TopBar() {
       <header className="fixed top-0 left-0 right-0 z-40 h-12 bg-surface border-b border-border flex items-center px-3 gap-3">
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2 shrink-0">
-          <Image src="/logo.svg" alt="Feed Factory" width={24} height={24} className="invert dark:invert-0" />
-          <span className="font-semibold text-sm hidden sm:block">Feed Factory</span>
+          <Image src="/logo.png" alt="Feed Factory" width={24} height={24} className="theme-logo" />
+          <span className="font-semibold text-sm">Feed Factory</span>
         </Link>
 
         {/* Desktop nav */}
@@ -190,8 +198,18 @@ export default function TopBar() {
                 className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
                 autoFocus
               />
+              <select
+                value={feedCategoryId}
+                onChange={(e) => setFeedCategoryId(e.target.value)}
+                className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+              >
+                <option value="">-- No Category --</option>
+                {catsData?.categories.map((c) => (
+                  <option key={c.id} value={String(c.id)}>{c.name}</option>
+                ))}
+              </select>
               <div className="flex gap-2">
-                <button type="button" onClick={() => setAddFeedOpen(false)} className="flex-1 py-2 rounded-lg border border-border text-sm hover:bg-white/5">Cancel</button>
+                <button type="button" onClick={() => { setAddFeedOpen(false); setFeedUrl(""); setFeedCategoryId(""); }} className="flex-1 py-2 rounded-lg border border-border text-sm hover:bg-white/5">Cancel</button>
                 <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover">Add</button>
               </div>
             </form>

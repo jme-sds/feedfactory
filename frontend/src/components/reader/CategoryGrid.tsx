@@ -3,7 +3,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { categories, type Category } from "@/lib/api";
 import { useReaderStore } from "@/lib/store";
-import { MoreVertical, Trash2, Pencil, Plus, CheckCheck } from "lucide-react";
+import { MoreVertical, Trash2, Pencil, Plus, CheckCheck, Star } from "lucide-react";
 import { useState } from "react";
 
 export default function CategoryGrid() {
@@ -48,7 +48,7 @@ export default function CategoryGrid() {
     );
   }
 
-  const { categories: cats = [], total_unread = 0, uncategorized_unread = 0, has_uncategorized = false, newest_ts_all = 0 } = data || {};
+  const { categories: cats = [], total_unread = 0, uncategorized_unread = 0, has_uncategorized = false, newest_ts_all = 0, favorites_count = 0, favorites_unread = 0 } = data || {};
 
   const allTile = { id: "all", name: "All Feeds", unread_count: total_unread, newest_ts: newest_ts_all };
   const aiDigest = cats.find((c) => c.name === "AI Digest");
@@ -74,6 +74,26 @@ export default function CategoryGrid() {
     <div className="tile-grid">
       {/* All Feeds */}
       <Tile id="all" name="All Feeds" unread={total_unread} isActive={selectedCategoryId === "all"} />
+
+      {/* Favorites tile */}
+      {favorites_count > 0 && (
+        <button
+          onClick={() => selectCategory("favorites")}
+          className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left ${
+            selectedCategoryId === "favorites"
+              ? "border-yellow-400/60 bg-yellow-400/10"
+              : "border-yellow-400/20 bg-yellow-400/5 hover:border-yellow-400/40 hover:bg-yellow-400/10"
+          }`}
+        >
+          <div className="flex items-center gap-1.5">
+            <Star size={13} className="text-yellow-400" fill="currentColor" />
+            <span className="font-medium text-sm">Favorites</span>
+          </div>
+          {favorites_unread > 0 && (
+            <span className="mt-1.5 text-xs font-bold text-yellow-400">{favorites_unread}</span>
+          )}
+        </button>
+      )}
 
       {/* AI Digest pinned tile */}
       {aiDigest && (

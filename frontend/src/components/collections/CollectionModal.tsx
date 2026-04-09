@@ -33,6 +33,10 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
   const [ragTopK, setRagTopK] = useState(collection.rag_top_k);
   const [ragMinSim, setRagMinSim] = useState(collection.rag_min_similarity);
   const [ragEvictDays, setRagEvictDays] = useState(collection.rag_eviction_days);
+  const [hdbscanMinClusterSize, setHdbscanMinClusterSize] = useState(collection.hdbscan_min_cluster_size);
+  const [hdbscanMinSamples, setHdbscanMinSamples] = useState(collection.hdbscan_min_samples);
+  const [hdbscanEpsilon, setHdbscanEpsilon] = useState(collection.hdbscan_cluster_selection_epsilon);
+  const [hdbscanMethod, setHdbscanMethod] = useState(collection.hdbscan_cluster_selection_method);
   const [systemPrompt, setSystemPrompt] = useState(collection.system_prompt || "");
 
   useEffect(() => {
@@ -89,6 +93,10 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
         rag_top_k: ragTopK,
         rag_min_similarity: ragMinSim,
         rag_eviction_days: ragEvictDays,
+        hdbscan_min_cluster_size: hdbscanMinClusterSize,
+        hdbscan_min_samples: hdbscanMinSamples,
+        hdbscan_cluster_selection_epsilon: hdbscanEpsilon,
+        hdbscan_cluster_selection_method: hdbscanMethod,
       } as any);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -252,6 +260,31 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
                   <div>
                     <label className="text-xs text-muted/70 block mb-1">Evict (days)</label>
                     <input type="number" value={ragEvictDays} onChange={(e) => setRagEvictDays(Number(e.target.value))} className={inputClass} />
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className={labelClass}>Clustering (HDBSCAN)</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs text-muted/70 block mb-1">Min Cluster Size</label>
+                    <input type="number" min="2" value={hdbscanMinClusterSize} onChange={(e) => setHdbscanMinClusterSize(Number(e.target.value))} className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted/70 block mb-1">Min Samples (0 = auto)</label>
+                    <input type="number" min="0" value={hdbscanMinSamples} onChange={(e) => setHdbscanMinSamples(Number(e.target.value))} className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted/70 block mb-1">Selection Epsilon</label>
+                    <input type="number" min="0" step="0.05" value={hdbscanEpsilon} onChange={(e) => setHdbscanEpsilon(Number(e.target.value))} className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted/70 block mb-1">Selection Method</label>
+                    <select value={hdbscanMethod} onChange={(e) => setHdbscanMethod(e.target.value)} className={inputClass}>
+                      <option value="eom">EOM (variable size)</option>
+                      <option value="leaf">Leaf (uniform size)</option>
+                    </select>
                   </div>
                 </div>
               </div>

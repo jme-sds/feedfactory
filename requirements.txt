@@ -11,5 +11,8 @@ gradio_client
 Jinja2
 sentence-transformers
 scikit-learn
+hdbscan
+spacy
+textblob
 sqlite-vec
 

@@ -7,7 +7,7 @@ import {
   ArrowLeft, Filter, CheckSquare, CheckCheck, CircleDot, Sparkles,
   X, MoreVertical, ScanText, FolderInput, Trash2
 } from "lucide-react";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 
 interface Filters {
   status: "all" | "unread" | "read";
@@ -19,13 +19,19 @@ interface Filters {
 export default function ArticleStream() {
   const qc = useQueryClient();
   const {
-    selectedCategoryId, selectedFeedId,
+    selectedCategoryId, selectedFeedId, selectedArticle,
     selectArticle, goBack,
     selectModeActive, setSelectModeActive,
     selectedArticleUrls, toggleSelectedArticle, clearSelection,
   } = useReaderStore();
 
-  const [filters, setFilters] = useState<Filters>({ status: "unread", includeKw: "", excludeKw: "", since: "" });
+  const isFavoritesView = selectedCategoryId === "favorites" && !selectedFeedId;
+  const [filters, setFilters] = useState<Filters>({ status: isFavoritesView ? "all" : "unread", includeKw: "", excludeKw: "", since: "" });
+
+  // Switch default filter when entering/leaving favorites view
+  useEffect(() => {
+    setFilters((f) => ({ ...f, status: isFavoritesView ? "all" : "unread" }));
+  }, [isFavoritesView]);
   const [filterOpen, setFilterOpen] = useState(false);
   const [streamMenuOpen, setStreamMenuOpen] = useState(false);
   const [changeCatOpen, setChangeCatOpen] = useState(false);
@@ -67,7 +73,9 @@ export default function ArticleStream() {
   // Client-side filter
   const filtered = useMemo(() => {
     return rawArticles.filter((a) => {
-      if (filters.status === "unread" && a.is_read) return false;
+      // Keep the currently-open article visible even if it's been marked read,
+      // so the user sees it greyed out rather than suddenly disappearing.
+      if (filters.status === "unread" && a.is_read && a.link !== selectedArticle?.link) return false;
       if (filters.status === "read" && !a.is_read) return false;
       const text = (a.title + " " + a.source_title).toLowerCase();
       if (filters.includeKw) {
@@ -84,7 +92,7 @@ export default function ArticleStream() {
       }
       return true;
     });
-  }, [rawArticles, filters]);
+  }, [rawArticles, filters, selectedArticle?.link]);
 
   const handleMarkAllRead = async () => {
     const urls = filtered.filter((a) => !a.is_read).map((a) => a.link);
@@ -164,7 +172,7 @@ export default function ArticleStream() {
           <ArrowLeft size={18} />
         </button>
         <span className="font-semibold text-sm flex-1 truncate">
-          {selectedFeedId === "__all__" ? "All Articles" : (currentFeed?.name ?? "Articles")}
+          {isFavoritesView ? "Favorites" : selectedFeedId === "__all__" ? "All Articles" : (currentFeed?.name ?? "Articles")}
         </span>
         <button onClick={() => setFilterOpen(!filterOpen)} className={`p-1.5 rounded-md transition-colors ${filterOpen ? "text-primary bg-primary/10" : "text-muted hover:text-white hover:bg-white/5"}`}>
           <Filter size={16} />

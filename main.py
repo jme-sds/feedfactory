@@ -33,6 +33,10 @@ import numpy as np
 import array
 import sqlite_vec
 from sqlalchemy import event
+import gc
+from textblob import TextBlob
+import spacy
+import hdbscan
 
 
 
@@ -44,11 +48,15 @@ DATABASE_URL = f"sqlite:///{DB_FILE}"
 
 # --- UPDATE YOUR INITIAL PROMPT CONSTANT ---
 INITIAL_SYSTEM_PROMPT = """You are an expert news editor. You have been given a list of highly related articles about a specific topic.
-Your goal is to write a single cohesive digest section for this topic.
+Your goal is to write a single cohesive narrative paragraph for this topic.
 
-Write a HIGH-LEVEL NARRATIVE PARAGRAPH (4-6 sentences) that synthesizes the news. Explain "what is going on" by weaving the facts together. Give the section a catchy, relevant title.
+Write a HIGH-LEVEL NARRATIVE PARAGRAPH (4-6 sentences) that synthesizes the news. Explain "what is going on" by weaving the facts together.
 
-Output valid HTML. Use <h3> for the category title and <p> for the narrative. Do NOT include a list of sources, and do NOT wrap the entire output in html/body tags."""
+Output only the paragraph text. Do NOT include a title, headings, HTML tags, bullet points, or source lists."""
+
+TITLE_SYSTEM_PROMPT = """You are a news editor. Given a list of article titles about a single topic cluster, produce a short, punchy headline (5–10 words) that captures the shared theme.
+
+Output only the headline text — no quotes, no punctuation at the end, no HTML, no explanation."""
 
 
 engine = create_engine(DATABASE_URL)
@@ -62,6 +70,31 @@ def load_sqlite_vec(dbapi_conn, connection_record):
 # --- Batch scrape tracking ---
 _active_batch_scrapes: set = set()
 _batch_scrape_lock = threading.Lock()
+
+# --- Polite fetching state ---
+# Per-domain semaphore: limit concurrent RSS requests to 2 per origin.
+_domain_semaphores: dict = {}
+_domain_semaphores_lock = threading.Lock()
+
+# Per-feed backoff: url -> float (unix timestamp until which the feed is suppressed)
+_feed_backoff: dict = {}
+
+# Per-URL on-demand scrape cooldown: url -> float (last scrape timestamp)
+_scrape_last_fetched: dict = {}
+
+FEEDFACTORY_UA = "FeedFactory/1.0 (+https://github.com/jme-sds/feedfactory; feed-reader)"
+
+def _get_domain_semaphore(url: str) -> threading.Semaphore:
+    """Return (creating if needed) a per-domain semaphore capped at 2 concurrent requests."""
+    try:
+        from urllib.parse import urlparse as _urlparse
+        netloc = _urlparse(url).netloc or url
+    except Exception:
+        netloc = url
+    with _domain_semaphores_lock:
+        if netloc not in _domain_semaphores:
+            _domain_semaphores[netloc] = threading.Semaphore(2)
+        return _domain_semaphores[netloc]
 
 # --- Models ---
 class GlobalSettings(SQLModel, table=True):
@@ -80,10 +113,19 @@ class GlobalSettings(SQLModel, table=True):
     reader_font_family: str = Field(default="system-ui, -apple-system, sans-serif")
     reader_font_size: str = Field(default="1.15rem")
     reader_line_height: str = Field(default="1.7")
+    reader_font_family_mobile: str = Field(default="")
+    reader_font_size_mobile: str = Field(default="")
+    reader_line_height_mobile: str = Field(default="")
     # --- NEW: PWA Offline Limit ---
     pwa_offline_limit: int = Field(default=200)
     default_focus_keywords: str = Field(default="")
     ui_theme: str = Field(default="default")
+    ui_accent: str = Field(default="")
+    ui_custom_colors: str = Field(default="")
+    default_hdbscan_min_cluster_size: int = Field(default=3)
+    default_hdbscan_min_samples: int = Field(default=0)  # 0 = use min_cluster_size (HDBSCAN default)
+    default_hdbscan_cluster_selection_epsilon: float = Field(default=0.0)
+    default_hdbscan_cluster_selection_method: str = Field(default="eom")
 
 class Category(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -108,6 +150,10 @@ class Collection(SQLModel, table=True):
     rag_top_k: int = Field(default=3)
     rag_min_similarity: float = Field(default=0.60)
     rag_eviction_days: int = Field(default=14)
+    hdbscan_min_cluster_size: int = Field(default=3)
+    hdbscan_min_samples: int = Field(default=0)  # 0 = use min_cluster_size (HDBSCAN default)
+    hdbscan_cluster_selection_epsilon: float = Field(default=0.0)
+    hdbscan_cluster_selection_method: str = Field(default="eom")
 
 class ArticleVector(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -118,6 +164,7 @@ class ArticleVector(SQLModel, table=True):
     embedding: bytes
     last_retrieved_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
     retrieval_count: int = Field(default=0)
+    ingested_at: datetime.datetime = Field(default_factory=datetime.datetime.now, index=True)
 
 class Feed(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -125,6 +172,8 @@ class Feed(SQLModel, table=True):
     collection_id: Optional[int] = Field(default=None, foreign_key="collection.id")
     collection: Optional[Collection] = Relationship(back_populates="feeds")
     auto_scrape: bool = Field(default=False)
+    etag: Optional[str] = Field(default=None)
+    last_modified: Optional[str] = Field(default=None)
 
 class Subscription(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -133,11 +182,19 @@ class Subscription(SQLModel, table=True):
     category_id: Optional[int] = Field(default=None, foreign_key="category.id")
     added_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
     auto_scrape: bool = Field(default=False)
+    etag: Optional[str] = Field(default=None)
+    last_modified: Optional[str] = Field(default=None)
 
 class ReadItem(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     item_link: str = Field(unique=True, index=True)
     read_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
+
+class FavoriteItem(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    item_link: str = Field(unique=True, index=True)
+    favorited_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
+    unfavorited_at: Optional[datetime.datetime] = Field(default=None)
 
 class CachedArticle(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -153,6 +210,23 @@ class CachedArticle(SQLModel, table=True):
     category_id: Optional[int] = Field(default=None, foreign_key="category.id")
     added_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
     scraped_content: Optional[str] = Field(default=None)
+    subjectivity_score: Optional[float] = Field(default=None)
+    heuristic_tag: Optional[str] = Field(default=None)
+
+
+class ArticleEmbedding(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    article_id: int = Field(foreign_key="cachedarticle.id", index=True)
+    embedding: bytes
+    created_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
+
+
+class ArticleEntity(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    article_id: int = Field(foreign_key="cachedarticle.id", index=True)
+    entity_text: str
+    entity_label: str  # PERSON / ORG / GPE
+
 
 # --- Helpers ---
 def clean_model_id(raw_id: str) -> str:
@@ -180,11 +254,69 @@ def get_settings(session: Session) -> GlobalSettings:
         session.add(settings); session.commit(); session.refresh(settings)
     return settings
 
-def fetch_external_feed(url):
-    try:
-        resp = requests.get(url, headers={"User-Agent": "FeedFactory/1.0"}, timeout=5)
-        if resp.status_code == 200: return feedparser.parse(resp.content)
-    except: pass
+_FEED_NOT_MODIFIED = object()  # sentinel for 304 responses
+
+def fetch_external_feed(url, etag=None, last_modified=None):
+    """Fetch an RSS feed with conditional request support and polite error handling.
+
+    Returns:
+        feedparser result on success
+        _FEED_NOT_MODIFIED sentinel on 304 Not Modified
+        None on failure
+    """
+    # Skip feeds that are in backoff after a 429/503
+    backoff_until = _feed_backoff.get(url)
+    if backoff_until and time.time() < backoff_until:
+        logger.info(f"[Feed] Skipping {url} — in backoff until {datetime.datetime.fromtimestamp(backoff_until).isoformat()}")
+        return None
+
+    headers = {"User-Agent": FEEDFACTORY_UA}
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+
+    sem = _get_domain_semaphore(url)
+    for attempt in range(2):
+        try:
+            with sem:
+                resp = requests.get(url, headers=headers, timeout=12)
+
+            if resp.status_code == 304:
+                return _FEED_NOT_MODIFIED
+
+            if resp.status_code == 429 or resp.status_code == 503:
+                retry_after = resp.headers.get("Retry-After")
+                delay = 60.0
+                if retry_after:
+                    try:
+                        delay = float(retry_after)
+                    except ValueError:
+                        pass
+                _feed_backoff[url] = time.time() + delay
+                logger.warning(f"[Feed] {resp.status_code} from {url} — backing off for {delay:.0f}s")
+                return None
+
+            if resp.status_code != 200:
+                logger.warning(f"[Feed] HTTP {resp.status_code} from {url}")
+                return None
+
+            parsed = feedparser.parse(resp.content)
+            # Attach conditional-request values for the caller to persist
+            parsed._ff_etag = resp.headers.get("ETag")
+            parsed._ff_last_modified = resp.headers.get("Last-Modified")
+            return parsed
+
+        except requests.exceptions.Timeout:
+            if attempt == 0:
+                logger.warning(f"[Feed] Timeout fetching {url}, retrying...")
+                time.sleep(3)
+            else:
+                logger.warning(f"[Feed] Timeout on retry for {url}, giving up.")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"[Feed] Request error for {url}: {e}")
+            break
+
     return None
 
 def parse_date(entry):
@@ -195,6 +327,7 @@ def parse_date(entry):
 # --- BACKGROUND SYNC AND CLEANUP ---
 def sync_all_feeds():
     logger.info("Starting background feed sync...")
+    newly_inserted_links: List[str] = []
     with Session(engine) as session:
         collections = session.exec(select(Collection)).all()
         for col in collections:
@@ -210,17 +343,33 @@ def sync_all_feeds():
                                 published=parse_date(entry), source_title=f"✨ {col.name}", source_color="#1095c1",
                                 is_generated=True, category_id=col.category_id
                             ))
+                            newly_inserted_links.append(entry.link)
                 except Exception as e: logger.error(f"Sync error (Collection {col.name}): {e}")
 
         subs = session.exec(select(Subscription)).all()
         links_to_scrape = []  # (link, sub_id) for auto_scrape subs
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_sub = {executor.submit(fetch_external_feed, sub.url): sub for sub in subs}
+            future_to_sub = {
+                executor.submit(fetch_external_feed, sub.url, sub.etag, sub.last_modified): sub
+                for sub in subs
+            }
             for future in concurrent.futures.as_completed(future_to_sub):
                 sub = future_to_sub[future]
                 try:
                     feed = future.result()
+                    if feed is _FEED_NOT_MODIFIED:
+                        logger.info(f"[Sync] {sub.url} — not modified (304), skipping.")
+                        continue
                     if feed:
+                        # Persist updated conditional-request tokens
+                        if getattr(feed, '_ff_etag', None) or getattr(feed, '_ff_last_modified', None):
+                            db_sub = session.get(Subscription, sub.id)
+                            if db_sub:
+                                if feed._ff_etag:
+                                    db_sub.etag = feed._ff_etag
+                                if feed._ff_last_modified:
+                                    db_sub.last_modified = feed._ff_last_modified
+                                session.add(db_sub)
                         title = sub.title or feed.feed.get('title', 'Unknown Feed')
                         for entry in feed.entries:
                             if not session.exec(select(CachedArticle).where(CachedArticle.link == entry.link)).first():
@@ -230,6 +379,7 @@ def sync_all_feeds():
                                     published=parse_date(entry), source_title=title, source_color="#4CAF50",
                                     is_generated=False, category_id=sub.category_id
                                 ))
+                                newly_inserted_links.append(entry.link)
                                 if sub.auto_scrape and entry.link:
                                     links_to_scrape.append(entry.link)
                 except Exception as e: logger.error(f"Sync error (Sub {sub.url}): {e}")
@@ -252,6 +402,17 @@ def sync_all_feeds():
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as scrape_pool:
                 scrape_pool.map(_scrape_and_cache, links_to_scrape)
 
+    # NLP processing for newly ingested articles (fresh session after commit)
+    if newly_inserted_links:
+        try:
+            with Session(engine) as nlp_session:
+                new_articles = nlp_session.exec(
+                    select(CachedArticle).where(CachedArticle.link.in_(newly_inserted_links))
+                ).all()
+                process_article_nlp_batch(new_articles, nlp_session)
+        except Exception as e:
+            logger.error(f"[NLP] Post-sync NLP batch failed: {e}")
+
     logger.info("Feed sync complete.")
 
 def cleanup_old_articles():
@@ -263,10 +424,32 @@ def cleanup_old_articles():
         unread_cutoff = now - (settings.retention_unread_days * 86400)
         articles = session.exec(select(CachedArticle)).all()
         read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
+        fav_items = {f.item_link: f for f in session.exec(select(FavoriteItem)).all()}
         deleted = 0
         for article in articles:
-            is_read = article.link in read_links
+            link = article.link
+            # Currently favorited: never delete
+            if link in fav_items and fav_items[link].unfavorited_at is None:
+                continue
+            # Recently unfavorited: grace period from unfavorited_at (regardless of article age)
+            if link in fav_items and fav_items[link].unfavorited_at is not None:
+                unfav_ts = fav_items[link].unfavorited_at.timestamp()
+                if unfav_ts > read_cutoff:
+                    continue  # still within grace period
+                # Past grace period — clean up the FavoriteItem record and the article
+                session.delete(fav_items[link])
+                session.execute(text("DELETE FROM articleentity WHERE article_id = :aid"), {"aid": article.id})
+                session.execute(text("DELETE FROM articleembedding WHERE article_id = :aid"), {"aid": article.id})
+                session.execute(text("DELETE FROM vec_cached_articles WHERE rowid = :aid"), {"aid": article.id})
+                session.delete(article)
+                deleted += 1
+                continue
+            # Normal cleanup logic
+            is_read = link in read_links
             if (is_read and article.published < read_cutoff) or (not is_read and article.published < unread_cutoff):
+                session.execute(text("DELETE FROM articleentity WHERE article_id = :aid"), {"aid": article.id})
+                session.execute(text("DELETE FROM articleembedding WHERE article_id = :aid"), {"aid": article.id})
+                session.execute(text("DELETE FROM vec_cached_articles WHERE rowid = :aid"), {"aid": article.id})
                 session.delete(article)
                 deleted += 1
         session.commit()
@@ -315,33 +498,39 @@ def call_llm(settings: GlobalSettings, user_message: str, system_prompt: str) ->
 
 
 
-def save_rss_file(collection, content_html):
+def save_rss_file(collection, cluster_items: list):
+    """Save digest as RSS with one <item> per cluster.
+
+    cluster_items: list of (title: str, body_html: str) tuples, one per topic cluster.
+    """
     os.makedirs("/app/data/feeds", exist_ok=True)
     filename = f"/app/data/feeds/{collection.slug}.xml"
     now_str = datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S GMT")
-    item_title = f"{collection.name}: Digest {datetime.datetime.now().strftime('%d %b')}"
-    
-    # Generate a unique ID for this specific digest run
-    unique_id = f"{collection.slug}-{int(time.time())}"
-    
-    # Notice the <link> tag inside the <item> now uses the unique_id
+    run_ts = int(time.time())
+
+    items_xml = ""
+    for idx, (topic_title, body_html) in enumerate(cluster_items):
+        unique_id = f"{collection.slug}-{run_ts}-{idx}"
+        safe_title = html.escape(topic_title)
+        items_xml += f"""
+        <item>
+            <title>{safe_title}</title>
+            <link>http://localhost/digest/{unique_id}</link>
+            <description><![CDATA[{body_html}]]></description>
+            <pubDate>{now_str}</pubDate>
+            <guid>{unique_id}</guid>
+        </item>"""
+
     xml = f"""<?xml version="1.0" encoding="UTF-8" ?>
 <rss version="2.0">
     <channel>
         <title>{collection.name} Digest</title>
         <link>http://localhost</link>
         <description>AI Generated Digest</description>
-        <lastBuildDate>{now_str}</lastBuildDate>
-        <item>
-            <title>{item_title}</title>
-            <link>http://localhost/digest/{unique_id}</link>
-            <description><![CDATA[{content_html}]]></description>
-            <pubDate>{now_str}</pubDate>
-            <guid>{unique_id}</guid>
-        </item>
+        <lastBuildDate>{now_str}</lastBuildDate>{items_xml}
     </channel>
 </rss>"""
-    with open(filename, "w") as f: 
+    with open(filename, "w") as f:
         f.write(xml)
 
 def generate_digest_for_collection(collection_id: int):
@@ -365,14 +554,28 @@ def generate_digest_for_collection(collection_id: int):
 
             # 1. Fetch all feeds in parallel, keeping track of the specific Feed object
             with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-                # Note: We now pass the feed object itself into the dictionary, not just the URL
-                future_to_feed = {executor.submit(fetch_external_feed, feed.url): feed for feed in collection.feeds}
-                
+                future_to_feed = {
+                    executor.submit(fetch_external_feed, feed.url, feed.etag, feed.last_modified): feed
+                    for feed in collection.feeds
+                }
+
                 for future in concurrent.futures.as_completed(future_to_feed):
                     feed = future_to_feed[future]
                     try:
                         parsed = future.result()
+                        if parsed is _FEED_NOT_MODIFIED:
+                            logger.info(f"[Digest] {feed.url} — not modified (304), using cached entries.")
+                            parsed = None  # fall through; no new entries to add
                         if parsed:
+                            # Persist updated conditional-request tokens
+                            if getattr(parsed, '_ff_etag', None) or getattr(parsed, '_ff_last_modified', None):
+                                db_feed = session.get(Feed, feed.id)
+                                if db_feed:
+                                    if parsed._ff_etag:
+                                        db_feed.etag = parsed._ff_etag
+                                    if parsed._ff_last_modified:
+                                        db_feed.last_modified = parsed._ff_last_modified
+                                    session.add(db_feed)
                             for entry in parsed.entries:
                                 include_entry = True
 
@@ -461,8 +664,11 @@ def generate_digest_for_collection(collection_id: int):
             # --- Cluster articles; embeddings stored AFTER generation to keep RAG search space historical-only ---
             article_clusters, current_embeddings = cluster_articles(
                 all_entries,
-                num_clusters=5,
+                min_cluster_size=collection.hdbscan_min_cluster_size,
                 max_per_topic=collection.max_articles_per_topic,
+                min_samples=collection.hdbscan_min_samples,
+                cluster_selection_epsilon=collection.hdbscan_cluster_selection_epsilon,
+                cluster_selection_method=collection.hdbscan_cluster_selection_method,
             )
 
 
@@ -473,8 +679,20 @@ def generate_digest_for_collection(collection_id: int):
 
 
 
-
-
+            # --- Profile each cluster for entity-guided RAG ---
+            cluster_entity_profiles: List[List[str]] = []
+            try:
+                with Session(engine) as profile_session:
+                    for cluster_articles_list, _ in article_clusters:
+                        cluster_links = [a["link"] for a in cluster_articles_list]
+                        art_ids = profile_session.exec(
+                            select(CachedArticle.id).where(CachedArticle.link.in_(cluster_links))
+                        ).all()
+                        entity_names = profile_cluster(list(art_ids), profile_session)
+                        cluster_entity_profiles.append(entity_names)
+            except Exception as e:
+                logger.warning(f"[NLP] Entity profiling failed, falling back to pure vector RAG: {e}")
+                cluster_entity_profiles = [[] for _ in article_clusters]
 
             # Safeguard: Override legacy prompts (both the "3-5 categories" one AND the "bulleted list of links" one)
             active_prompt = collection.system_prompt
@@ -482,12 +700,12 @@ def generate_digest_for_collection(collection_id: int):
                 active_prompt = INITIAL_SYSTEM_PROMPT
 
             logger.info(f"[Digest] 🧠 Firing {len(article_clusters)} parallel LLM calls for each topic cluster...")
-            
-            # Define the worker function for the LLM + Python HTML Builder
-            def process_cluster(cluster_and_embedding):
-                cluster, center_embedding = cluster_and_embedding
 
-                # RAG: retrieve historical context using the cluster's center embedding
+            # Define the worker function: two LLM calls per cluster
+            def process_cluster(cluster_embedding_entities):
+                cluster, center_embedding, entity_names = cluster_embedding_entities
+
+                # RAG: retrieve historical context using entity profile + cluster center embedding
                 historical = []
                 if collection.rag_top_k > 0:
                     historical = retrieve_historical_context(
@@ -495,9 +713,20 @@ def generate_digest_for_collection(collection_id: int):
                         collection.id,
                         collection.rag_top_k,
                         collection.rag_min_similarity,
+                        entity_names=entity_names or None,
+                        filter_age=collection.filter_age,
+                        last_run=collection.last_run,
                     )
 
-                # 1. Prepare the text context for the LLM
+                # 1. Title call: article titles only → short punchy headline
+                titles_block = "\n".join(f"- {a['title']}" for a in cluster)
+                topic_title = call_llm(
+                    settings,
+                    f"Article titles:\n{titles_block}",
+                    TITLE_SYSTEM_PROMPT,
+                ).strip().strip('"').strip("'")
+
+                # 2. Narrative call: full article text + RAG context → cohesive paragraph
                 context = "\n".join([a["formatted"] for a in cluster])
 
                 historical_block = ""
@@ -515,24 +744,20 @@ def generate_digest_for_collection(collection_id: int):
                 user_msg = (
                     f"Here are the related articles for this topic:\n\n{context}"
                     + historical_block
-                    + "\n\nWrite this section of the digest."
+                    + "\n\nWrite the narrative paragraph for this topic."
                 )
 
-                # 2. Get the narrative paragraph from the LLM
-                llm_narrative = call_llm(settings, user_msg, active_prompt)
+                llm_narrative = f"<p>{html.escape(call_llm(settings, user_msg, active_prompt).strip())}</p>"
 
-                # 3. Programmatically build the perfectly formatted Sources HTML
+                # 3. Programmatically build the Sources list
                 sources_html = "\n<h5 style='margin-top: 1rem; margin-bottom: 0.5rem; color: #888;'>Sources:</h5>\n<ul style='font-size: 0.9rem; margin-bottom: 1.5rem;'>\n"
-
-                # We use html.escape on the title just in case the article title has weird characters like < or >
                 for article in cluster:
                     safe_title = html.escape(article['title'])
                     safe_link = article['link']
                     sources_html += f"    <li style='margin-bottom: 0.25rem;'><a href='{safe_link}' target='_blank' style='color: #1095c1; text-decoration: none;'>{safe_title}</a></li>\n"
-
                 sources_html += "</ul>\n"
 
-                # 5. Programmatically build the Context (RAG) section
+                # 4. Programmatically build the Context (RAG) section
                 context_html = ""
                 if historical:
                     context_html = "\n<h5 style='margin-top: 1rem; margin-bottom: 0.5rem; color: #888;'>Context:</h5>\n<ul style='font-size: 0.9rem; margin-bottom: 1.5rem;'>\n"
@@ -542,27 +767,21 @@ def generate_digest_for_collection(collection_id: int):
                         context_html += f"    <li style='margin-bottom: 0.25rem;'><a href='{safe_link}' target='_blank' style='color: #888; text-decoration: none;'>{safe_title}</a></li>\n"
                     context_html += "</ul>\n"
 
-                # 6. Stitch the LLM narrative, Sources, and Context together
-                return f"{llm_narrative}\n{sources_html}{context_html}"
+                body_html = f"{llm_narrative}\n{sources_html}{context_html}"
+                return (topic_title, body_html)
 
-            # Fire off the LLM calls simultaneously
-            cluster_html_results = []
+            # Fire off the LLM calls simultaneously (2 calls per cluster, still parallelised across clusters)
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                # Map preserves the order of the clusters
-                results = list(executor.map(process_cluster, article_clusters))
-                for res in results:
-                    cluster_html_results.append(res)
-
-            # Stitch the 5 perfectly written sections together
-            final_html = "\n<br><hr style='border-color: #333;'><br>\n".join(cluster_html_results)
+                cluster_items = list(executor.map(
+                    process_cluster,
+                    [(c, e, p) for (c, e), p in zip(article_clusters, cluster_entity_profiles)]
+                ))
 
             # Store today's embeddings NOW — after retrieval — so they don't pollute the RAG search space
             _store_article_vectors(all_entries, current_embeddings, collection.id)
 
-
-
             logger.info("[Digest] ✅ Multi-Topic LLM generation successful! Saving RSS digest...")
-            save_rss_file(collection, final_html)
+            save_rss_file(collection, cluster_items)
 
             collection.last_run = datetime.datetime.now()
             session.add(collection); session.commit()
@@ -651,6 +870,7 @@ def _store_article_vectors(articles: List[dict], embeddings, collection_id: int)
                     content=article["text"],
                     url=article["link"],
                     embedding=blob,
+                    ingested_at=datetime.datetime.now(),
                 )
                 session.add(av)
                 session.flush()
@@ -660,6 +880,7 @@ def _store_article_vectors(articles: List[dict], embeddings, collection_id: int)
                 stored += 1
             else:
                 existing.embedding = blob
+                existing.ingested_at = datetime.datetime.now()
                 session.add(existing)
                 session.execute(text(
                     "UPDATE vec_articles SET embedding = :emb WHERE rowid = :rid"
@@ -673,22 +894,87 @@ def retrieve_historical_context(
     collection_id: int,
     top_k: int,
     min_similarity: float = 0.60,
+    entity_names: Optional[List[str]] = None,
+    filter_age: str = "24h",
+    last_run: Optional[datetime.datetime] = None,
 ) -> List[dict]:
-    """KNN vector search against vec_articles, with LRU bookkeeping on hits."""
+    """Hybrid entity+vector search against vec_articles, with LRU bookkeeping on hits.
+
+    If entity_names are provided, first finds historical ArticleVector entries whose
+    CachedArticle source contains those entities (entity pre-filter), then ranks the
+    matching articles by vector distance to the cluster centroid. Falls back to pure
+    vector search when no entity matches are found.
+
+    filter_age / last_run are used to exclude vectors ingested in the current
+    collection window — preventing articles from the most recent run from appearing
+    as historical context when a digest is re-run within the same period.
+    """
     if top_k <= 0:
         return []
     t0 = time.time()
     blob = array.array('f', query_embedding.astype(float)).tobytes()
+
+    # Compute the ingested_at cutoff: only retrieve vectors older than the collection window
+    now = datetime.datetime.now()
+    if filter_age == "24h":
+        ingest_cutoff = now - datetime.timedelta(hours=24)
+    elif filter_age == "new" and last_run:
+        ingest_cutoff = last_run
+    else:
+        ingest_cutoff = None  # "all" — no restriction
+
+    # Entity pre-filter: find ArticleVector IDs that contain the cluster's key entities
+    entity_filter_ids: Optional[List[int]] = None
+    if entity_names:
+        try:
+            cutoff_ts = time.time() - 86400  # only look at articles older than 24h
+            with Session(engine) as ent_session:
+                rows = ent_session.exec(
+                    select(ArticleEntity.article_id)
+                    .join(CachedArticle, CachedArticle.id == ArticleEntity.article_id)
+                    .where(ArticleEntity.entity_text.in_(entity_names))
+                    .where(CachedArticle.published < cutoff_ts)
+                    .distinct()
+                ).all()
+                entity_filter_ids = list(rows) if rows else None
+        except Exception as e:
+            logger.warning(f"[RAG] Entity pre-filter failed: {e}")
+            entity_filter_ids = None
+
+    # Build the ingested_at filter clause for the SQL queries
+    ingest_clause = ""
+    ingest_params: dict = {}
+    if ingest_cutoff is not None:
+        ingest_clause = "AND av.ingested_at < :ingest_cutoff"
+        ingest_params["ingest_cutoff"] = ingest_cutoff.isoformat()
+
     with Session(engine) as session:
-        result_proxy = session.execute(text("""
-            SELECT av.id, av.title, av.content, av.url,
-                   vec_distance_cosine(va.embedding, :qemb) AS distance
-            FROM vec_articles va
-            JOIN articlevector av ON av.id = va.rowid
-            WHERE va.collection_id = :cid
-            ORDER BY distance ASC
-            LIMIT :k
-        """), {"qemb": blob, "cid": collection_id, "k": top_k * 3})
+        if entity_filter_ids:
+            # Narrow vector search to entity-matched articles
+            placeholders_in = ",".join(str(i) for i in entity_filter_ids)
+            result_proxy = session.execute(text(f"""
+                SELECT av.id, av.title, av.content, av.url,
+                       vec_distance_cosine(va.embedding, :qemb) AS distance
+                FROM vec_articles va
+                JOIN articlevector av ON av.id = va.rowid
+                WHERE va.collection_id = :cid
+                  AND av.id IN ({placeholders_in})
+                  {ingest_clause}
+                ORDER BY distance ASC
+                LIMIT :k
+            """), {"qemb": blob, "cid": collection_id, "k": top_k * 3, **ingest_params})
+        else:
+            # Pure vector search — original behaviour
+            result_proxy = session.execute(text(f"""
+                SELECT av.id, av.title, av.content, av.url,
+                       vec_distance_cosine(va.embedding, :qemb) AS distance
+                FROM vec_articles va
+                JOIN articlevector av ON av.id = va.rowid
+                WHERE va.collection_id = :cid
+                  {ingest_clause}
+                ORDER BY distance ASC
+                LIMIT :k
+            """), {"qemb": blob, "cid": collection_id, "k": top_k * 3, **ingest_params})
         rows = result_proxy.fetchall()
 
         results = []
@@ -1026,54 +1312,225 @@ def get_embedding_model():
     return _embedding_model
 
 
+_spacy_model = None
+
+def get_spacy_model():
+    global _spacy_model
+    if _spacy_model is None:
+        logger.info("[NLP] Loading spaCy en_core_web_sm model into memory...")
+        _spacy_model = spacy.load("en_core_web_sm")
+    return _spacy_model
+
+
+def process_article_nlp(article: CachedArticle, session: Session) -> None:
+    """
+    Run TextBlob sentiment, spaCy NER, and MiniLM embedding for a CachedArticle.
+    Each NLP step is individually try/excepted — failures are logged and non-fatal.
+    """
+    # Guard: skip if already processed
+    existing = session.exec(
+        select(ArticleEmbedding).where(ArticleEmbedding.article_id == article.id)
+    ).first()
+    if existing:
+        return
+
+    article_text = article.scraped_content or article.display_body or ""
+    if not article_text:
+        return
+
+    # 1. Subjectivity score via TextBlob
+    try:
+        article.subjectivity_score = TextBlob(article_text).sentiment.subjectivity
+        session.add(article)
+    except Exception as e:
+        logger.warning(f"[NLP] TextBlob failed for article {article.id}: {e}")
+
+    # 2. spaCy NER — PERSON / ORG / GPE only, deduplicated
+    try:
+        nlp = get_spacy_model()
+        doc = nlp(article_text[:10000])
+        seen: set = set()
+        for ent in doc.ents:
+            if ent.label_ not in ("PERSON", "ORG", "GPE"):
+                continue
+            key = (ent.text.strip(), ent.label_)
+            if key in seen:
+                continue
+            seen.add(key)
+            session.add(ArticleEntity(
+                article_id=article.id,
+                entity_text=ent.text.strip(),
+                entity_label=ent.label_,
+            ))
+    except Exception as e:
+        logger.warning(f"[NLP] spaCy NER failed for article {article.id}: {e}")
+
+    # 3. Embedding — encode first ~512 tokens (sentence-transformers truncates internally)
+    try:
+        model = get_embedding_model()
+        emb = model.encode(article_text[:4096])
+        blob = array.array('f', emb.astype(float)).tobytes()
+
+        ae = ArticleEmbedding(article_id=article.id, embedding=blob)
+        session.add(ae)
+        session.flush()  # needed to get ae.id
+
+        session.execute(text(
+            "INSERT INTO vec_cached_articles(rowid, embedding, article_id) "
+            "VALUES (:rid, :emb, :aid) "
+            "ON CONFLICT(rowid) DO UPDATE SET embedding = excluded.embedding"
+        ), {"rid": article.id, "emb": blob, "aid": article.id})
+    except Exception as e:
+        logger.warning(f"[NLP] Embedding failed for article {article.id}: {e}")
+
+
+EMBEDDING_BATCH_SIZE = 16
+
+
+def process_article_nlp_batch(articles: List[CachedArticle], session: Session) -> None:
+    """
+    Process a list of CachedArticle objects through the NLP pipeline.
+    Commits every EMBEDDING_BATCH_SIZE articles to bound transaction size.
+    """
+    if not articles:
+        return
+
+    # Filter to only unprocessed articles
+    unprocessed = []
+    for art in articles:
+        existing = session.exec(
+            select(ArticleEmbedding).where(ArticleEmbedding.article_id == art.id)
+        ).first()
+        if not existing:
+            unprocessed.append(art)
+
+    if not unprocessed:
+        return
+
+    logger.info(f"[NLP] Processing {len(unprocessed)} new articles through NLP pipeline...")
+
+    for i in range(0, len(unprocessed), EMBEDDING_BATCH_SIZE):
+        batch = unprocessed[i:i + EMBEDDING_BATCH_SIZE]
+        for article in batch:
+            try:
+                process_article_nlp(article, session)
+            except Exception as e:
+                logger.warning(f"[NLP] Batch NLP failed for article {article.id}: {e}")
+        try:
+            session.commit()
+        except Exception as e:
+            logger.error(f"[NLP] Batch commit failed: {e}")
+            session.rollback()
+
+    logger.info(f"[NLP] Batch NLP processing complete for {len(unprocessed)} articles.")
+
+
+def profile_cluster(article_ids: List[int], session: Session) -> List[str]:
+    """
+    Return the top 5 most frequent entity_text values across a cluster's articles.
+    """
+    if not article_ids:
+        return []
+    try:
+        rows = session.exec(
+            select(ArticleEntity).where(ArticleEntity.article_id.in_(article_ids))
+        ).all()
+
+        freq: dict = {}
+        for row in rows:
+            key = (row.entity_text, row.entity_label)
+            freq[key] = freq.get(key, 0) + 1
+
+        top = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:5]
+        return [k[0] for k, _ in top]
+    except Exception as e:
+        logger.warning(f"[NLP] profile_cluster failed: {e}")
+        return []
+
+
 def cluster_articles(
     articles: List[dict],
-    num_clusters: int = 5,
+    min_cluster_size: int = 3,
     max_per_topic: int = 5,
+    min_samples: int = 0,
+    cluster_selection_epsilon: float = 0.0,
+    cluster_selection_method: str = "eom",
 ) -> tuple:
-    """Groups articles, drops outliers, and returns
-    (clusters_with_centers, embeddings) where clusters_with_centers is a list of
-    (cluster_articles, center_embedding) tuples and embeddings is the full numpy
-    array for all articles (used by the caller to store vectors after generation)."""
+    """Groups articles using HDBSCAN (density-based; no fixed k).
+    Returns (clusters_with_centers, embeddings) where clusters_with_centers is a
+    list of (cluster_articles, center_embedding) tuples and embeddings is the full
+    numpy array (used by the caller to store vectors after generation).
+    Noise points (label -1) are silently discarded.
+
+    Embeddings are L2-normalized before clustering so that Euclidean distance
+    behaves identically to Cosine distance — the correct metric for MiniLM vectors."""
+    # Normalize/coerce params — DB columns added via ALTER TABLE may be NULL on old rows
+    min_cluster_size = max(2, int(min_cluster_size or 3))
+    min_samples = max(0, int(min_samples or 0))
+    cluster_selection_epsilon = max(0.0, float(cluster_selection_epsilon or 0.0))
+    cluster_selection_method = cluster_selection_method if cluster_selection_method in ("eom", "leaf") else "eom"
+
     model = get_embedding_model()
     texts_to_embed = [f"{a['title']}. {a['text']}" for a in articles]
-
-    n_clusters = min(num_clusters, len(articles))
-    if n_clusters <= 1:
-        logger.info(f"[Clustering] Embedding {len(articles)} articles for semantic analysis...")
-        embeddings = model.encode(texts_to_embed)
-        center = np.mean(embeddings, axis=0)
-        return [(articles[:max_per_topic], center)], embeddings
 
     logger.info(f"[Clustering] Embedding {len(articles)} articles for semantic analysis...")
     embeddings = model.encode(texts_to_embed)
 
-    logger.info(f"[Clustering] Grouping into {n_clusters} topics and filtering outliers...")
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
+    # L2-normalize so Euclidean distance == Cosine distance (correct for MiniLM)
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    embeddings_norm = embeddings / np.maximum(norms, 1e-10)
 
-    # Fit the model AND get the mathematical distances to the cluster centers
-    kmeans.fit(embeddings)
-    labels = kmeans.labels_
-    distances = kmeans.transform(embeddings)
+    # Degenerate case: too few articles to cluster
+    if len(articles) <= min_cluster_size:
+        center = np.mean(embeddings_norm, axis=0)
+        return [(articles[:max_per_topic], center)], embeddings_norm
 
-    clusters = {i: [] for i in range(n_clusters)}
+    # min_samples=0 means "let HDBSCAN use its default (same as min_cluster_size)"
+    effective_min_samples = min_samples if min_samples > 0 else None
+
+    logger.info(
+        f"[Clustering] Running HDBSCAN (min_cluster_size={min_cluster_size}, "
+        f"min_samples={effective_min_samples}, epsilon={cluster_selection_epsilon}, "
+        f"method={cluster_selection_method})..."
+    )
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=effective_min_samples,
+        cluster_selection_epsilon=cluster_selection_epsilon,
+        cluster_selection_method=cluster_selection_method,
+        metric="euclidean",
+    )
+    clusterer.fit(embeddings_norm)
+    labels = clusterer.labels_
+
+    # Group by label, skip noise (-1)
+    clusters: dict = {}
     for idx, label in enumerate(labels):
-        # Grab the exact distance from this article to its assigned topic's core
-        dist_to_center = distances[idx, label]
-        clusters[label].append({"article": articles[idx], "dist": dist_to_center})
+        if label == -1:
+            continue
+        clusters.setdefault(label, []).append(idx)
+
+    # Fallback: if HDBSCAN found no clusters, return all articles as one group
+    if not clusters:
+        logger.info("[Clustering] HDBSCAN found no clusters; returning all articles as one group.")
+        center = np.mean(embeddings_norm, axis=0)
+        result = (articles[:max_per_topic], center)
+        del clusterer
+        gc.collect()
+        return [result], embeddings_norm
 
     final_clusters = []
-    for c_id, items in clusters.items():
-        if not items:
-            continue
-        # Sort by distance (closest to the core topic first)
-        items.sort(key=lambda x: x["dist"])
-        # Slice off the outliers based on our max_per_topic setting
-        sliced_articles = [x["article"] for x in items[:max_per_topic]]
-        center_embedding = kmeans.cluster_centers_[c_id]
-        final_clusters.append((sliced_articles, center_embedding))
+    for label, indices in clusters.items():
+        cluster_embs = embeddings_norm[indices]
+        center_embedding = np.mean(cluster_embs, axis=0)
+        cluster_articles_list = [articles[i] for i in indices[:max_per_topic]]
+        final_clusters.append((cluster_articles_list, center_embedding))
 
-    return final_clusters, embeddings
+    logger.info(f"[Clustering] HDBSCAN found {len(final_clusters)} clusters.")
+    del clusterer
+    gc.collect()
+
+    return final_clusters, embeddings_norm
 
 
 
@@ -1094,7 +1551,15 @@ async def lifespan(app: FastAPI):
         ))
         session.commit()
     logger.info("[RAG] vec_articles virtual table ready.")
-    
+
+    with Session(engine) as session:
+        session.execute(text(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_cached_articles "
+            "USING vec0(embedding float[384], article_id integer)"
+        ))
+        session.commit()
+    logger.info("[NLP] vec_cached_articles virtual table ready.")
+
     with Session(engine) as session:
         settings = get_settings(session)
        
@@ -1459,13 +1924,8 @@ _IMAGE_CACHE_ORDER: list = []  # LRU eviction order
 _IMAGE_CACHE_MAX = 200
 
 _PROXY_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": f"{FEEDFACTORY_UA} (image-proxy)",
     "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
 }
 
 def _cache_put(url_hash: str, content_type: str, data: bytes):
@@ -1693,6 +2153,7 @@ def api_get_categories():
     with Session(engine) as session:
         categories = session.exec(select(Category).order_by(Category.name)).all()
         read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
+        fav_links = {f.item_link for f in session.exec(select(FavoriteItem).where(FavoriteItem.unfavorited_at == None)).all()}
         articles = session.exec(select(CachedArticle)).all()
 
         unread_counts = {cat.id: 0 for cat in categories}
@@ -1701,6 +2162,8 @@ def api_get_categories():
         latest_timestamps[None] = 0
         latest_timestamps["all"] = 0
         total_unread = 0
+        favorites_count = 0
+        favorites_unread = 0
 
         for article in articles:
             cat_id = article.category_id
@@ -1717,6 +2180,10 @@ def api_get_categories():
                     unread_counts[cat_id] += 1
                 elif cat_id is None:
                     unread_counts[None] += 1
+            if article.link in fav_links:
+                favorites_count += 1
+                if article.link not in read_links:
+                    favorites_unread += 1
 
         has_uncategorized = unread_counts[None] > 0 or any(
             a.category_id is None for a in articles
@@ -1736,6 +2203,8 @@ def api_get_categories():
             "newest_ts_all": latest_timestamps["all"],
             "uncategorized_unread": unread_counts[None],
             "has_uncategorized": has_uncategorized,
+            "favorites_count": favorites_count,
+            "favorites_unread": favorites_unread,
         }
 
 @app.post("/api/categories")
@@ -1997,6 +2466,7 @@ def api_get_articles(category_id: str = "all", feed_id: str = None, limit: int =
     with Session(engine) as session:
         settings = get_settings(session)
         read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
+        fav_links = {f.item_link for f in session.exec(select(FavoriteItem).where(FavoriteItem.unfavorited_at == None)).all()}
         # Build auto_scrape lookup for subscriptions
         sub_auto_scrape = {
             f"sub_{s.id}": s.auto_scrape
@@ -2006,16 +2476,20 @@ def api_get_articles(category_id: str = "all", feed_id: str = None, limit: int =
         query = select(CachedArticle).order_by(CachedArticle.published.desc()).limit(effective_limit)
         if feed_id:
             query = query.where(CachedArticle.feed_id == feed_id)
-        else:
-            if category_id == "none":
-                query = query.where(CachedArticle.category_id == None)
-            elif category_id != "all":
-                query = query.where(CachedArticle.category_id == int(category_id))
+        elif category_id == "favorites":
+            if not fav_links:
+                return []
+            query = query.where(CachedArticle.link.in_(list(fav_links)))
+        elif category_id == "none":
+            query = query.where(CachedArticle.category_id == None)
+        elif category_id != "all":
+            query = query.where(CachedArticle.category_id == int(category_id))
         db_articles = session.exec(query).all()
         result = []
         for a in db_articles:
             art_dict = a.model_dump(exclude={"scraped_content"})
             art_dict['is_read'] = a.link in read_links
+            art_dict['is_favorited'] = a.link in fav_links
             dt = datetime.datetime.fromtimestamp(a.published)
             art_dict['published_str'] = dt.strftime("%b %d, %H:%M")
             art_dict['auto_scrape'] = sub_auto_scrape.get(a.feed_id, False)
@@ -2069,6 +2543,39 @@ async def api_mark_unread_bulk(request: Request):
             for item in items:
                 session.delete(item)
             session.commit()
+    return Response(status_code=204)
+
+@app.post("/api/articles/favorite")
+async def api_favorite_article(request: Request):
+    data = await request.json()
+    url = data.get("url", "").strip()
+    if url:
+        with Session(engine) as session:
+            existing = session.exec(select(FavoriteItem).where(FavoriteItem.item_link == url)).first()
+            if existing:
+                existing.unfavorited_at = None
+                existing.favorited_at = datetime.datetime.now()
+                session.add(existing)
+            else:
+                session.add(FavoriteItem(item_link=url))
+            # Mark as unread immediately upon favoriting
+            read_item = session.exec(select(ReadItem).where(ReadItem.item_link == url)).first()
+            if read_item:
+                session.delete(read_item)
+            session.commit()
+    return Response(status_code=204)
+
+@app.post("/api/articles/unfavorite")
+async def api_unfavorite_article(request: Request):
+    data = await request.json()
+    url = data.get("url", "").strip()
+    if url:
+        with Session(engine) as session:
+            fav = session.exec(select(FavoriteItem).where(FavoriteItem.item_link == url)).first()
+            if fav:
+                fav.unfavorited_at = datetime.datetime.now()
+                session.add(fav)
+                session.commit()
     return Response(status_code=204)
 
 @app.post("/api/articles/summarize")
@@ -2154,6 +2661,8 @@ async def api_summarize_bulk(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+_SCRAPE_COOLDOWN_SECONDS = 5.0
+
 @app.post("/api/reader/fetch_content")
 async def api_fetch_content(request: Request):
     data = await request.json()
@@ -2166,6 +2675,13 @@ async def api_fetch_content(request: Request):
                 logger.info(f"[Reader] Using cached scraped content for: {url}")
                 return {"html": article.scraped_content}
 
+        # Enforce a per-URL cooldown to avoid hammering the same origin repeatedly
+        now = time.time()
+        last = _scrape_last_fetched.get(url, 0)
+        if now - last < _SCRAPE_COOLDOWN_SECONDS:
+            raise HTTPException(status_code=429, detail="Please wait before re-fetching the same article.")
+        _scrape_last_fetched[url] = now
+
         # Not cached — scrape and save
         content = scrape_article_html(url)
         with Session(engine) as session:
@@ -2175,6 +2691,8 @@ async def api_fetch_content(request: Request):
                 session.add(article)
                 session.commit()
         return {"html": content}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -2254,6 +2772,10 @@ def api_list_collections():
                 "rag_top_k": col.rag_top_k,
                 "rag_min_similarity": col.rag_min_similarity,
                 "rag_eviction_days": col.rag_eviction_days,
+                "hdbscan_min_cluster_size": col.hdbscan_min_cluster_size,
+                "hdbscan_min_samples": col.hdbscan_min_samples,
+                "hdbscan_cluster_selection_epsilon": col.hdbscan_cluster_selection_epsilon,
+                "hdbscan_cluster_selection_method": col.hdbscan_cluster_selection_method,
                 "system_prompt": col.system_prompt,
                 "status_text": status_text,
                 "status_type": status_type,
@@ -2276,7 +2798,12 @@ def api_get_collection(cid: int):
             "context_length": col.context_length, "filter_max_articles": col.filter_max_articles,
             "filter_age": col.filter_age, "max_articles_per_topic": col.max_articles_per_topic,
             "rag_top_k": col.rag_top_k, "rag_min_similarity": col.rag_min_similarity,
-            "rag_eviction_days": col.rag_eviction_days, "system_prompt": col.system_prompt,
+            "rag_eviction_days": col.rag_eviction_days,
+            "hdbscan_min_cluster_size": col.hdbscan_min_cluster_size,
+            "hdbscan_min_samples": col.hdbscan_min_samples,
+            "hdbscan_cluster_selection_epsilon": col.hdbscan_cluster_selection_epsilon,
+            "hdbscan_cluster_selection_method": col.hdbscan_cluster_selection_method,
+            "system_prompt": col.system_prompt,
             "feeds": feeds,
         }
 
@@ -2297,7 +2824,11 @@ async def api_create_collection(request: Request):
             name=name, slug=slug, schedule_time=g.default_schedule,
             context_length=g.default_context_length, filter_max_articles=g.default_filter_max,
             filter_age=g.default_filter_age, system_prompt=g.default_system_prompt,
-            category_id=cat_id, focus_keywords=g.default_focus_keywords or ""
+            category_id=cat_id, focus_keywords=g.default_focus_keywords or "",
+            hdbscan_min_cluster_size=g.default_hdbscan_min_cluster_size,
+            hdbscan_min_samples=g.default_hdbscan_min_samples,
+            hdbscan_cluster_selection_epsilon=g.default_hdbscan_cluster_selection_epsilon,
+            hdbscan_cluster_selection_method=g.default_hdbscan_cluster_selection_method,
         )
         session.add(col)
         session.commit()
@@ -2403,6 +2934,21 @@ async def api_update_collection_settings(cid: int, request: Request):
         col.rag_top_k = int(data.get("rag_top_k", col.rag_top_k))
         col.rag_min_similarity = float(data.get("rag_min_similarity", col.rag_min_similarity))
         col.rag_eviction_days = int(data.get("rag_eviction_days", col.rag_eviction_days))
+        _hcs = data.get("hdbscan_min_cluster_size")
+        if _hcs is not None:
+            try: col.hdbscan_min_cluster_size = max(2, int(_hcs))
+            except (ValueError, TypeError): pass
+        _hms = data.get("hdbscan_min_samples")
+        if _hms is not None:
+            try: col.hdbscan_min_samples = max(0, int(_hms))
+            except (ValueError, TypeError): pass
+        _hep = data.get("hdbscan_cluster_selection_epsilon")
+        if _hep is not None:
+            try: col.hdbscan_cluster_selection_epsilon = max(0.0, float(_hep))
+            except (ValueError, TypeError): pass
+        _hmeth = data.get("hdbscan_cluster_selection_method")
+        if _hmeth in ("eom", "leaf"):
+            col.hdbscan_cluster_selection_method = _hmeth
         session.add(col)
         session.commit()
     return {"ok": True}
@@ -2480,9 +3026,18 @@ def api_get_settings():
             "reader_font_family": s.reader_font_family,
             "reader_font_size": s.reader_font_size,
             "reader_line_height": s.reader_line_height,
+            "reader_font_family_mobile": s.reader_font_family_mobile,
+            "reader_font_size_mobile": s.reader_font_size_mobile,
+            "reader_line_height_mobile": s.reader_line_height_mobile,
             "pwa_offline_limit": s.pwa_offline_limit,
             "demo_mode": DEMO_MODE,
             "ui_theme": s.ui_theme,
+            "ui_accent": s.ui_accent,
+            "ui_custom_colors": s.ui_custom_colors,
+            "default_hdbscan_min_cluster_size": s.default_hdbscan_min_cluster_size,
+            "default_hdbscan_min_samples": s.default_hdbscan_min_samples,
+            "default_hdbscan_cluster_selection_epsilon": s.default_hdbscan_cluster_selection_epsilon,
+            "default_hdbscan_cluster_selection_method": s.default_hdbscan_cluster_selection_method,
         }
 
 @app.post("/api/settings/update")
@@ -2498,20 +3053,43 @@ async def api_update_settings(request: Request):
                 settings.api_key = data["api_key"]
             if data.get("model_name") is not None:
                 settings.model_name = clean_model_id(data["model_name"])
-        if data.get("ui_theme") in ("default", "dark", "light", "sepia"):
+        if data.get("ui_theme") in ("default", "light", "sepia", "custom"):
             settings.ui_theme = data["ui_theme"]
+        ui_accent = data.get("ui_accent", "")
+        if isinstance(ui_accent, str) and re.match(r'^#[0-9a-fA-F]{6}$', ui_accent):
+            settings.ui_accent = ui_accent
+        ui_custom_colors = data.get("ui_custom_colors", "")
+        if isinstance(ui_custom_colors, str) and len(ui_custom_colors) < 1024:
+            try:
+                import json as _json
+                parsed = _json.loads(ui_custom_colors) if ui_custom_colors else {}
+                hex_re = re.compile(r'^#[0-9a-fA-F]{6}$')
+                allowed_keys = {"background", "surface", "border", "primary", "muted", "fg"}
+                if all(k in allowed_keys and isinstance(v, str) and hex_re.match(v) for k, v in parsed.items()):
+                    settings.ui_custom_colors = ui_custom_colors
+            except Exception:
+                pass
         for field in ["default_schedule", "default_filter_age", "default_system_prompt", "default_focus_keywords"]:
             if data.get(field) is not None:
                 setattr(settings, field, data[field])
-        for css_field in ["reader_font_family", "reader_font_size", "reader_line_height"]:
+        for css_field in ["reader_font_family", "reader_font_size", "reader_line_height",
+                          "reader_font_family_mobile", "reader_font_size_mobile", "reader_line_height_mobile"]:
             if data.get(css_field) is not None:
                 setattr(settings, css_field, _sanitize_css_value(data[css_field]))
-        for int_field in ["default_context_length", "default_filter_max", "retention_read_days", "retention_unread_days", "pwa_offline_limit"]:
+        for int_field in ["default_context_length", "default_filter_max", "retention_read_days", "retention_unread_days", "pwa_offline_limit",
+                          "default_hdbscan_min_cluster_size", "default_hdbscan_min_samples"]:
             if data.get(int_field) is not None:
                 try:
                     setattr(settings, int_field, int(data[int_field]))
                 except (ValueError, TypeError):
                     pass
+        if data.get("default_hdbscan_cluster_selection_epsilon") is not None:
+            try:
+                settings.default_hdbscan_cluster_selection_epsilon = max(0.0, float(data["default_hdbscan_cluster_selection_epsilon"]))
+            except (ValueError, TypeError):
+                pass
+        if data.get("default_hdbscan_cluster_selection_method") in ("eom", "leaf"):
+            settings.default_hdbscan_cluster_selection_method = data["default_hdbscan_cluster_selection_method"]
         session.add(settings)
         session.commit()
     return {"ok": True}
