@@ -1,9 +1,9 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { categories, type Category } from "@/lib/api";
+import { categories, collections, type Category } from "@/lib/api";
 import { useReaderStore } from "@/lib/store";
-import { MoreVertical, Trash2, Pencil, Plus, CheckCheck, Star } from "lucide-react";
+import { MoreVertical, Trash2, Pencil, Plus, CheckCheck, Star, Layers } from "lucide-react";
 import { useState } from "react";
 
 export default function CategoryGrid() {
@@ -38,6 +38,30 @@ export default function CategoryGrid() {
     if (!confirm(`Delete category "${cat.name}"? Feeds will become uncategorized.`)) return;
     await categories.delete(cat.id);
     qc.invalidateQueries({ queryKey: ["categories"] });
+  };
+
+  const handleCreateCollection = async (cat: Category) => {
+    setMenuOpenId(null);
+    const name = prompt("New collection name:", cat.name);
+    if (!name || !name.trim()) return;
+    const trimmed = name.trim();
+    const slug = trimmed.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    try {
+      const feedsData = await categories.feeds(String(cat.id));
+      const subs = feedsData.feeds.filter((f) => f.type === "subscription");
+      if (subs.length === 0) {
+        alert("No source feeds found in this category.");
+        return;
+      }
+      const col = await collections.create({ name: trimmed, slug, category_id: cat.id });
+      for (const sub of subs) {
+        await collections.addFeed(col.id, sub.url, sub.auto_scrape);
+      }
+      qc.invalidateQueries({ queryKey: ["collections"] });
+      alert(`Collection "${trimmed}" created with ${subs.length} feed${subs.length !== 1 ? "s" : ""}.`);
+    } catch (err: any) {
+      alert(err.message);
+    }
   };
 
   if (isLoading) {
@@ -119,7 +143,7 @@ export default function CategoryGrid() {
               <MoreVertical size={14} />
             </button>
             {menuOpenId === `cat-${aiDigest.id}` && (
-              <CategoryMenu cat={aiDigest} onMarkRead={() => handleMarkRead(String(aiDigest.id))} onRename={() => handleRename(aiDigest)} onDelete={() => handleDelete(aiDigest)} />
+              <CategoryMenu cat={aiDigest} onMarkRead={() => handleMarkRead(String(aiDigest.id))} onRename={() => handleRename(aiDigest)} onDelete={() => handleDelete(aiDigest)} onCreateCollection={() => handleCreateCollection(aiDigest)} />
             )}
           </div>
         </div>
@@ -149,7 +173,7 @@ export default function CategoryGrid() {
               <MoreVertical size={14} />
             </button>
             {menuOpenId === `cat-${cat.id}` && (
-              <CategoryMenu cat={cat} onMarkRead={() => handleMarkRead(String(cat.id))} onRename={() => handleRename(cat)} onDelete={() => handleDelete(cat)} />
+              <CategoryMenu cat={cat} onMarkRead={() => handleMarkRead(String(cat.id))} onRename={() => handleRename(cat)} onDelete={() => handleDelete(cat)} onCreateCollection={() => handleCreateCollection(cat)} />
             )}
           </div>
         </div>
@@ -163,19 +187,23 @@ export default function CategoryGrid() {
   );
 }
 
-function CategoryMenu({ cat, onMarkRead, onRename, onDelete }: {
+function CategoryMenu({ cat, onMarkRead, onRename, onDelete, onCreateCollection }: {
   cat: Category;
   onMarkRead: () => void;
   onRename: () => void;
   onDelete: () => void;
+  onCreateCollection: () => void;
 }) {
   return (
-    <div className="absolute right-0 top-6 w-44 bg-surface border border-border rounded-lg shadow-xl py-1 z-50 text-sm">
+    <div className="absolute right-0 top-6 w-52 bg-surface border border-border rounded-lg shadow-xl py-1 z-50 text-sm">
       <button onClick={onMarkRead} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5">
         <CheckCheck size={14} /> Mark All Read
       </button>
       <button onClick={onRename} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5">
         <Pencil size={14} /> Rename
+      </button>
+      <button onClick={onCreateCollection} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5">
+        <Layers size={14} /> Create Collection
       </button>
       <button onClick={onDelete} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5 text-danger">
         <Trash2 size={14} /> Delete

@@ -1375,10 +1375,13 @@ def process_article_nlp(article: CachedArticle, session: Session) -> None:
         session.add(ae)
         session.flush()  # needed to get ae.id
 
+        # sqlite-vec virtual tables don't support UPSERT; delete then insert
+        session.execute(text(
+            "DELETE FROM vec_cached_articles WHERE rowid = :rid"
+        ), {"rid": article.id})
         session.execute(text(
             "INSERT INTO vec_cached_articles(rowid, embedding, article_id) "
-            "VALUES (:rid, :emb, :aid) "
-            "ON CONFLICT(rowid) DO UPDATE SET embedding = excluded.embedding"
+            "VALUES (:rid, :emb, :aid)"
         ), {"rid": article.id, "emb": blob, "aid": article.id})
     except Exception as e:
         logger.warning(f"[NLP] Embedding failed for article {article.id}: {e}")
@@ -2888,10 +2891,11 @@ async def api_add_collection_feed(cid: int, request: Request):
     url = data.get("url", "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL required")
+    auto_scrape = bool(data.get("auto_scrape", False))
     with Session(engine) as session:
         if session.exec(select(Feed).where(Feed.collection_id == cid, Feed.url == url)).first():
             raise HTTPException(status_code=409, detail="Feed already in collection")
-        feed = Feed(url=url, collection_id=cid)
+        feed = Feed(url=url, collection_id=cid, auto_scrape=auto_scrape)
         session.add(feed)
         session.commit()
         session.refresh(feed)

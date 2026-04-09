@@ -330,10 +330,10 @@ export const collections = {
     apiFetch<void>(`/api/collections/${id}`, { method: "DELETE" }),
   getFeeds: (id: number) =>
     apiFetch<CollectionFeed[]>(`/api/collections/${id}/feeds`),
-  addFeed: (id: number, url: string) =>
+  addFeed: (id: number, url: string, auto_scrape?: boolean) =>
     apiFetch<CollectionFeed>(`/api/collections/${id}/feeds`, {
       method: "POST",
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, ...(auto_scrape !== undefined && { auto_scrape }) }),
     }),
   trigger: (id: number) =>
     apiFetch<{ ok: boolean }>(`/api/collections/${id}/trigger`, { method: "POST" }),

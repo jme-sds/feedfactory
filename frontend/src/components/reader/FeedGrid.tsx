@@ -1,9 +1,9 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { categories, subscriptions, feeds, type FeedItem } from "@/lib/api";
+import { categories, subscriptions, feeds, collections, type FeedItem } from "@/lib/api";
 import { useReaderStore } from "@/lib/store";
-import { ArrowLeft, MoreVertical, CheckCheck, Trash2, FolderInput, ScanText, Pencil } from "lucide-react";
+import { ArrowLeft, MoreVertical, CheckCheck, Trash2, FolderInput, ScanText, Pencil, Layers } from "lucide-react";
 import { useState } from "react";
 
 export default function FeedGrid({ onBack }: { onBack?: () => void }) {
@@ -57,6 +57,31 @@ export default function FeedGrid({ onBack }: { onBack?: () => void }) {
     await categories.delete(numId);
     qc.invalidateQueries({ queryKey: ["categories"] });
     handleBack();
+  };
+
+  const handleCreateCollection = async () => {
+    setCatMenuOpen(false);
+    const numId = parseInt(selectedCategoryId);
+    if (isNaN(numId)) return;
+    const name = prompt("New collection name:", category_name);
+    if (!name || !name.trim()) return;
+    const trimmed = name.trim();
+    const slug = trimmed.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    try {
+      const subs = feedList.filter((f) => f.type === "subscription");
+      if (subs.length === 0) {
+        alert("No source feeds found in this category.");
+        return;
+      }
+      const col = await collections.create({ name: trimmed, slug, category_id: numId });
+      for (const sub of subs) {
+        await collections.addFeed(col.id, sub.url, sub.auto_scrape);
+      }
+      qc.invalidateQueries({ queryKey: ["collections"] });
+      alert(`Collection "${trimmed}" created with ${subs.length} feed${subs.length !== 1 ? "s" : ""}.`);
+    } catch (err: any) {
+      alert(err.message);
+    }
   };
 
   const handleMarkRead = async (feedId: string) => {
@@ -125,6 +150,12 @@ export default function FeedGrid({ onBack }: { onBack?: () => void }) {
                     className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/5"
                   >
                     <Pencil size={14} /> Rename Category
+                  </button>
+                  <button
+                    onClick={handleCreateCollection}
+                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/5"
+                  >
+                    <Layers size={14} /> Create Collection
                   </button>
                   <button
                     onClick={handleCatDelete}
