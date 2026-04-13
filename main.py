@@ -469,6 +469,27 @@ def sync_all_feeds():
         except Exception as e:
             logger.error(f"[NLP] Post-sync NLP batch failed: {e}")
 
+    # Reconcile uncategorized articles that belong to feeds which still exist
+    with Session(engine) as session:
+        subs = session.exec(select(Subscription)).all()
+        fixed = 0
+        for sub in subs:
+            if sub.category_id is None:
+                continue
+            orphans = session.exec(
+                select(CachedArticle).where(
+                    CachedArticle.feed_id == f"sub_{sub.id}",
+                    CachedArticle.category_id == None
+                )
+            ).all()
+            for art in orphans:
+                art.category_id = sub.category_id
+                session.add(art)
+                fixed += 1
+        if fixed:
+            session.commit()
+            logger.info(f"[Sync] Reconciled {fixed} uncategorized article(s) to their feed's category.")
+
     logger.info("Feed sync complete.")
 
 def cleanup_old_articles():
@@ -2843,6 +2864,10 @@ async def api_update_subscription(sub_id: int, request: Request):
             raise HTTPException(status_code=404)
         sub.category_id = cat_id
         session.add(sub)
+        # Migrate existing cached articles to the new category
+        for art in session.exec(select(CachedArticle).where(CachedArticle.feed_id == f"sub_{sub_id}")).all():
+            art.category_id = cat_id
+            session.add(art)
         session.commit()
         return {"id": sub.id, "url": sub.url, "title": sub.title, "category_id": sub.category_id}
 
