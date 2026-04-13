@@ -1,10 +1,11 @@
 "use client";
 
 import { useReaderStore } from "@/lib/store";
-import { articles, type Article } from "@/lib/api";
-import { X, ExternalLink, BookOpen, Sparkles, ArrowLeft, CircleDot, CircleCheck, Star } from "lucide-react";
+import { articles, personalTags, topicTags, type Article } from "@/lib/api";
+import { EntityPill, TopicTagPill } from "@/components/ui/EntityPill";
+import { X, ExternalLink, BookOpen, Sparkles, ArrowLeft, CircleDot, CircleCheck, Star, Tag } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useQuery } from "@tanstack/react-query";
 
 export default function ArticlePanel({ isModal = false }: { isModal?: boolean }) {
   const { selectedArticle, selectArticle, goBack } = useReaderStore();
@@ -19,6 +20,19 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
   const bodyRef = useRef<HTMLDivElement>(null);
   const markedReadRef = useRef(false);
 
+  // Topic tags — local state so adds/removes feel instant
+  const [localTopicTags, setLocalTopicTags] = useState<string[] | null>(null);
+  const [tagInput, setTagInput] = useState("");
+  const [tagInputOpen, setTagInputOpen] = useState(false);
+  const tagInputRef = useRef<HTMLInputElement>(null);
+
+  // Fetch all known topic tag names for autocomplete suggestions
+  const { data: allTopicTags } = useQuery({
+    queryKey: ["topic-tags"],
+    queryFn: topicTags.list,
+  });
+  const knownTagNames = allTopicTags?.map((t) => t.name) ?? [];
+
   // Reset when article changes; auto-load reader for auto-scrape feeds
   useEffect(() => {
     setReaderHtml(null);
@@ -26,6 +40,9 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
     setReaderMode(false);
     setLocalIsRead(null);
     setLocalIsFavorited(null);
+    setLocalTopicTags(null);
+    setTagInput("");
+    setTagInputOpen(false);
     markedReadRef.current = false;
 
     if (!selectedArticle) return;
@@ -163,6 +180,34 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
     setSummarizing(false);
   };
 
+  // Use local state if the user has touched tags this session, else fall back to article data
+  const currentTopicTags = localTopicTags ?? (a.topic_tags ?? []);
+
+  const handleAddTag = async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || currentTopicTags.includes(trimmed)) return;
+    setLocalTopicTags([...currentTopicTags, trimmed]);
+    setTagInput("");
+    setTagInputOpen(false);
+    try {
+      await personalTags.train(a.id, trimmed, 1);
+      qc.invalidateQueries({ queryKey: ["articles"] });
+      qc.invalidateQueries({ queryKey: ["topic-tags"] });
+    } catch {
+      setLocalTopicTags(currentTopicTags); // rollback on error
+    }
+  };
+
+  const handleRemoveTag = async (name: string) => {
+    setLocalTopicTags(currentTopicTags.filter((t) => t !== name));
+    try {
+      await personalTags.train(a.id, name, 0);
+      qc.invalidateQueries({ queryKey: ["articles"] });
+    } catch {
+      setLocalTopicTags(currentTopicTags); // rollback on error
+    }
+  };
+
   const displayContent = readerMode && readerHtml ? readerHtml : a.display_body;
 
   const container = (
@@ -223,7 +268,55 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
       <div ref={bodyRef} className="flex-1 overflow-y-auto px-4 py-4 lg:px-8">
         <div className="max-w-2xl mx-auto">
         <p className="text-xs text-muted uppercase tracking-wide mb-2">{a.source_title}</p>
-        <h1 className="text-xl font-bold leading-snug mb-4">{a.title}</h1>
+        <h1 className="text-xl font-bold leading-snug mb-3">{a.title}</h1>
+        {/* Topic tags — interactive: add with + button, remove with × */}
+        <div className="flex flex-wrap items-center gap-1.5 mb-3">
+          {currentTopicTags.map((t) => (
+            <TopicTagPill key={t} name={t} onRemove={() => handleRemoveTag(t)} />
+          ))}
+          {tagInputOpen ? (
+            <span className="inline-flex items-center gap-1 relative">
+              <input
+                ref={tagInputRef}
+                autoFocus
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { e.preventDefault(); handleAddTag(tagInput); }
+                  if (e.key === "Escape") { setTagInputOpen(false); setTagInput(""); }
+                }}
+                placeholder="tag name…"
+                className="w-28 bg-background border border-yellow-400/40 rounded-full px-2.5 py-0.5 text-xs focus:outline-none focus:border-yellow-400/70 text-yellow-200"
+                list="topic-tag-suggestions"
+              />
+              <datalist id="topic-tag-suggestions">
+                {knownTagNames.filter((n) => !currentTopicTags.includes(n)).map((n) => (
+                  <option key={n} value={n} />
+                ))}
+              </datalist>
+              <button onClick={() => { setTagInputOpen(false); setTagInput(""); }} className="text-muted hover:text-white text-xs">
+                <X size={12} />
+              </button>
+            </span>
+          ) : (
+            <button
+              onClick={() => setTagInputOpen(true)}
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-xs text-muted hover:text-white border border-dashed border-white/20 hover:border-white/40 transition-colors"
+              title="Add tag"
+            >
+              <Tag size={11} /> tag
+            </button>
+          )}
+        </div>
+
+        {/* NER entity pills — read-only */}
+        {(a.entities?.length ?? 0) > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-4">
+            {(a.entities ?? []).map((e, i) => (
+              <EntityPill key={`e-${i}`} entity={e} />
+            ))}
+          </div>
+        )}
         <p className="text-xs text-muted mb-6">{a.published_str}</p>
 
         {/* AI Summary */}

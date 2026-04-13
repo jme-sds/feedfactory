@@ -26,6 +26,14 @@ interface ReaderState {
   selectedArticleUrls: Set<string>;
   toggleSelectedArticle: (url: string) => void;
   clearSelection: () => void;
+
+  // Tag browse mode
+  tagBrowseMode: boolean;
+  setTagBrowseMode: (on: boolean) => void;
+  selectedTagFilter: string | null;
+  selectTagFilter: (tag: string | null) => void;
+  selectedEntityFilter: string | null;
+  selectEntityFilter: (entity: string | null) => void;
 }
 
 export const useReaderStore = create<ReaderState>((set, get) => ({
@@ -96,6 +104,32 @@ export const useReaderStore = create<ReaderState>((set, get) => ({
     set({ selectedArticleUrls: next });
   },
   clearSelection: () => set({ selectedArticleUrls: new Set(), selectModeActive: false }),
+
+  tagBrowseMode: false,
+  setTagBrowseMode: (on) => set(on
+    ? { tagBrowseMode: true }
+    : { tagBrowseMode: false, selectedTagFilter: null, selectedEntityFilter: null }
+  ),
+
+  selectedTagFilter: null,
+  selectTagFilter: (tag) => set({
+    selectedTagFilter: tag,
+    selectedEntityFilter: null,
+    selectedCategoryId: "all",
+    selectedFeedId: null,
+    selectedArticle: null,
+    mobileView: tag ? "stream" : "categories",
+  }),
+
+  selectedEntityFilter: null,
+  selectEntityFilter: (entity) => set({
+    selectedEntityFilter: entity,
+    selectedTagFilter: null,
+    selectedCategoryId: "all",
+    selectedFeedId: null,
+    selectedArticle: null,
+    mobileView: entity ? "stream" : "categories",
+  }),
 }));
 
 function getCsrfToken(): string {

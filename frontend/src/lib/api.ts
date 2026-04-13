@@ -84,6 +84,21 @@ export interface FeedsResponse {
   total_unread: number;
 }
 
+export interface ArticleEntity {
+  text: string;
+  label: "PERSON" | "ORG" | "GPE";
+}
+
+export interface TopicTag {
+  id: number;
+  name: string;
+  threshold: number;
+  is_active: boolean;
+  positive_count: number;
+  negative_count: number;
+  is_ready: boolean;
+}
+
 export interface Article {
   id: number;
   ui_id: string;
@@ -101,6 +116,9 @@ export interface Article {
   category_id: number | null;
   auto_scrape: boolean;
   has_scraped_content: boolean;
+  entities: ArticleEntity[];
+  topic_tags: string[];
+  personal_tags: string[];
 }
 
 export interface Collection {
@@ -385,6 +403,58 @@ export const settings = {
       body: fd,
     });
   },
+};
+
+// --- Personal Tags ---
+
+export interface PersonalTagStat {
+  tag_name: string;
+  positive_count: number;
+  negative_count: number;
+  is_ready: boolean;
+}
+
+export const personalTags = {
+  list: () => apiFetch<PersonalTagStat[]>("/api/personal-tags"),
+  train: (article_id: number, tag_name: string, label: 1 | 0) =>
+    apiFetch<{ ok: boolean }>("/api/personal-tags/train", {
+      method: "POST",
+      body: JSON.stringify({ article_id, tag_name, label }),
+    }),
+  delete: (tag_name: string) =>
+    apiFetch<void>(`/api/personal-tags/${encodeURIComponent(tag_name)}`, { method: "DELETE" }),
+};
+
+// --- Entities ---
+
+export interface EntityStat {
+  text: string;
+  label: "PERSON" | "ORG" | "GPE";
+  count: number;
+}
+
+export const entities = {
+  popular: (limit = 150) => apiFetch<EntityStat[]>(`/api/entities/popular?limit=${limit}`),
+};
+
+// --- Topic Tags ---
+
+export const topicTags = {
+  list: () => apiFetch<TopicTag[]>("/api/settings/topic-tags"),
+  create: (name: string, threshold: number) =>
+    apiFetch<TopicTag>("/api/settings/topic-tags", {
+      method: "POST",
+      body: JSON.stringify({ name, threshold }),
+    }),
+  update: (id: number, data: Partial<Pick<TopicTag, "name" | "threshold" | "is_active">>) =>
+    apiFetch<TopicTag>(`/api/settings/topic-tags/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  delete: (id: number) =>
+    apiFetch<void>(`/api/settings/topic-tags/${id}`, { method: "DELETE" }),
+  retag: () =>
+    apiFetch<{ ok: boolean }>("/api/settings/topic-tags/retag", { method: "POST" }),
 };
 
 // --- Status ---

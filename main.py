@@ -2,10 +2,10 @@ from fastapi import FastAPI, Request, Form, Depends, HTTPException, UploadFile, 
 from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, SQLModel, create_engine, select, or_, and_, Field, Relationship
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, text, UniqueConstraint
 from apscheduler.schedulers.background import BackgroundScheduler
 from contextlib import asynccontextmanager
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 import feedparser
@@ -29,6 +29,8 @@ import socket
 import ipaddress
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
+from sklearn.linear_model import SGDClassifier
+import joblib
 import numpy as np
 import array
 import sqlite_vec
@@ -226,6 +228,60 @@ class ArticleEntity(SQLModel, table=True):
     article_id: int = Field(foreign_key="cachedarticle.id", index=True)
     entity_text: str
     entity_label: str  # PERSON / ORG / GPE
+
+
+class TopicTag(SQLModel, table=True):
+    __tablename__ = "topictag"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(unique=True, index=True)
+    threshold: float = Field(default=0.30)
+    is_active: bool = Field(default=True)
+    created_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
+    # Personalization: serialized SGDClassifier trained on user feedback
+    model_data: Optional[bytes] = Field(default=None)
+    positive_count: int = Field(default=0)
+    negative_count: int = Field(default=0)
+
+
+class ArticleTopicTag(SQLModel, table=True):
+    __tablename__ = "articletopiactag"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    article_id: int = Field(foreign_key="cachedarticle.id", index=True)
+    tag_id: int = Field(foreign_key="topictag.id", index=True)
+    score: float
+    is_manual: bool = Field(default=False)  # True = user explicitly assigned this tag
+
+
+class PersonalTag(SQLModel, table=True):
+    """
+    One per (user_id, tag_name) pair.  Stores the serialized SGDClassifier
+    and training statistics so the classifier survives restarts.
+    """
+    __tablename__ = "personaltag"
+    __table_args__ = (UniqueConstraint("user_id", "tag_name"),)
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: str = Field(index=True)
+    tag_name: str
+    model_data: Optional[bytes] = Field(default=None)   # joblib-serialized classifier
+    positive_count: int = Field(default=0)
+    negative_count: int = Field(default=0)
+    created_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
+
+
+class ArticlePersonalTag(SQLModel, table=True):
+    """
+    Records which personal tags are applied to which articles, and whether
+    the assignment was manual (user clicked +tag) or inferred by the model.
+    label=1 means the tag applies; label=0 is a stored negative correction.
+    """
+    __tablename__ = "articlepersonaltag"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    article_id: int = Field(foreign_key="cachedarticle.id", index=True)
+    user_id: str = Field(index=True)
+    tag_name: str
+    label: int = Field(default=1)        # 1 = applies, 0 = negative correction
+    is_manual: bool = Field(default=True)
+    created_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
 
 
 # --- Helpers ---
@@ -831,24 +887,82 @@ def upgrade_db_schema(engine):
     """Automatically adds missing columns to existing SQLite tables."""
     logger.info("Checking database schema for required upgrades...")
     inspector = inspect(engine)
-    
+
+    # Pass 1: create any tables that are entirely missing
+    for table_name, table in SQLModel.metadata.tables.items():
+        if not inspector.has_table(table_name):
+            try:
+                table.create(bind=engine, checkfirst=True)
+                logger.info(f"✨ Auto-Migrated: Created missing table '{table_name}'")
+            except Exception as e:
+                logger.error(f"Failed to create table {table_name}: {e}")
+    # Refresh inspector so Pass 2 sees the newly created tables
+    inspector = inspect(engine)
+
+    # Pass 2: add any missing columns to existing tables
     with Session(engine) as session:
         for table_name, table in SQLModel.metadata.tables.items():
             if not inspector.has_table(table_name):
                 continue
-            
+
             existing_columns = [col['name'] for col in inspector.get_columns(table_name)]
-            
+
             for column in table.columns:
                 if column.name not in existing_columns:
                     col_type = column.type.compile(engine.dialect)
                     try:
-                        # Add the missing column safely
                         session.exec(text(f"ALTER TABLE {table_name} ADD COLUMN {column.name} {col_type}"))
                         logger.info(f"✨ Auto-Migrated: Added missing column '{column.name}' to '{table_name}'")
                     except Exception as e:
                         logger.error(f"Failed to migrate column {column.name} in {table_name}: {e}")
         session.commit()
+
+    # Pass 3: backfill NULL values introduced by ALTER TABLE ADD COLUMN
+    with Session(engine) as session:
+        try:
+            session.execute(text("UPDATE topictag SET positive_count = 0 WHERE positive_count IS NULL"))
+            session.execute(text("UPDATE topictag SET negative_count = 0 WHERE negative_count IS NULL"))
+            session.execute(text("UPDATE articletopiactag SET is_manual = 0 WHERE is_manual IS NULL"))
+            # Remove duplicate topic tag rows — keep the manual one (or highest id) per (article_id, tag_id)
+            session.execute(text("""
+                DELETE FROM articletopiactag
+                WHERE id NOT IN (
+                    SELECT MAX(id) FROM articletopiactag
+                    GROUP BY article_id, tag_id
+                )
+            """))
+            session.commit()
+        except Exception as e:
+            logger.warning(f"[Migration] NULL backfill failed (may be expected on first run): {e}")
+
+    # Clean up existing HTML-contaminated or garbage entity tags
+    try:
+        with Session(engine) as cleanup_session:
+            # Fast SQL pass: HTML chars and length violations
+            cleanup_session.execute(text(
+                "DELETE FROM articleentity WHERE "
+                "entity_text LIKE '%<%' OR entity_text LIKE '%>%' OR "
+                "entity_text LIKE '%=%' OR entity_text LIKE '%\"%' OR "
+                "entity_text LIKE '%/%' OR entity_text LIKE '%\\%' OR "
+                "LENGTH(TRIM(entity_text)) < 2 OR LENGTH(TRIM(entity_text)) > 80"
+            ))
+            cleanup_session.commit()
+            # Remove HTML entity patterns (e.g. you&#8217;re) and other garbage
+            cleanup_session.execute(text(
+                "DELETE FROM articleentity WHERE entity_text LIKE '%&%'"
+            ))
+            cleanup_session.commit()
+            # Python pass: CSS/BEM patterns and full is_valid_entity check
+            all_ents = cleanup_session.exec(select(ArticleEntity)).all()
+            bad_ids = [e.id for e in all_ents if not is_valid_entity(e.entity_text)]
+            if bad_ids:
+                cleanup_session.execute(
+                    text(f"DELETE FROM articleentity WHERE id IN ({','.join(str(i) for i in bad_ids)})")
+                )
+                cleanup_session.commit()
+                logger.info(f"[DB] Removed {len(bad_ids)} garbage entity tags on startup")
+    except Exception as e:
+        logger.error(f"[DB] Entity cleanup failed: {e}")
 
 # --- RAG Pipeline ---
 
@@ -1322,6 +1436,347 @@ def get_spacy_model():
     return _spacy_model
 
 
+# --- Entity quality helpers ---
+
+_HTML_CHARS = frozenset('<>"=')
+_HTML_ENTITY_RE = re.compile(r'&(?:#\d+|#x[0-9a-fA-F]+|[a-zA-Z]+);')
+
+def _normalize_entity_text(text: str) -> str:
+    """Decode HTML entities and normalize whitespace in entity text."""
+    decoded = html.unescape(text)
+    # Collapse internal whitespace
+    return re.sub(r'\s+', ' ', decoded).strip()
+
+def is_valid_entity(text: str) -> bool:
+    """Return False for HTML/CSS artefacts, too-short/long strings, and other garbage."""
+    t = _normalize_entity_text(text)
+    if len(t) < 2 or len(t) > 80:
+        return False
+    # HTML/CSS attribute fragments (e.g. class="dcr-130, data-id=42)
+    if _HTML_CHARS & set(t):
+        return False
+    # Residual HTML entity patterns that weren't fully decoded
+    if _HTML_ENTITY_RE.search(t):
+        return False
+    # URL or path fragments
+    if '/' in t or '\\' in t:
+        return False
+    # CSS class / BEM patterns: one or more lowercase-hyphen-digits segments, e.g. "dcr-130f"
+    if re.match(r'^[a-zA-Z][\w-]*-[\w-]*\d[\w-]*$', t) and not any(c.isspace() for c in t):
+        return False
+    # Entirely digits/punctuation/whitespace (no letters)
+    if not any(c.isalpha() for c in t):
+        return False
+    return True
+
+
+def _entity_sort_key(text: str) -> tuple:
+    """Sort key: prefer multi-word, then longer, then title-cased forms."""
+    words = text.split()
+    return (-len(words), -len(text), text)
+
+
+def deduplicate_entities(pairs: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """
+    Deduplicate (text, label) entity pairs robustly:
+      1. Decode HTML entities and normalize whitespace in each text.
+      2. Case-insensitive exact dedup — prefer the most title-cased / longest form.
+      3. PERSON last-name collapse — drop "Doe" when "John Doe" is present.
+      4. Any-name-part substring collapse for PERSON — "Joe" dominated by "Joe Biden".
+      5. Abbreviation collapse — drop "Calif." when "California" is present.
+      6. ORG/GPE prefix collapse — drop "Google" when "Google LLC" is present (exact prefix only).
+    Returns a deduplicated list.
+    """
+    by_label: dict[str, list[str]] = {}
+    for text, label in pairs:
+        normalized = _normalize_entity_text(text)
+        if normalized:
+            by_label.setdefault(label, []).append(normalized)
+
+    result: List[Tuple[str, str]] = []
+    for label, texts in by_label.items():
+        # Case-insensitive dedup: when multiple casings exist, keep the most title-cased form
+        case_groups: dict[str, list[str]] = {}
+        for t in texts:
+            case_groups.setdefault(t.lower(), []).append(t)
+
+        # From each case group pick the best form: prefer title-case, then longest
+        best: dict[str, str] = {}
+        for lower_key, variants in case_groups.items():
+            title_variants = [v for v in variants if v == v.title()]
+            best[lower_key] = title_variants[0] if title_variants else max(variants, key=len)
+
+        # Sort: multi-word first, then longer, so we evaluate "John Doe" before "Doe"
+        candidates = sorted(best.values(), key=_entity_sort_key)
+
+        kept: list[str] = []
+        for text in candidates:
+            text_lower = text.lower()
+            text_words = text_lower.split()
+            text_no_dot = text_lower.rstrip('.')
+
+            dominated = False
+            for k in kept:
+                k_lower = k.lower()
+                k_words = k_lower.split()
+
+                # Exact match (already deduped, but cover dot-stripped variants)
+                if text_lower == k_lower or text_no_dot == k_lower:
+                    dominated = True
+                    break
+
+                if label == "PERSON":
+                    # Single token that is any word in a kept multi-word name
+                    if len(text_words) == 1 and text_words[0] in k_words:
+                        dominated = True
+                        break
+                    # Last name match: "Doe" dominated by "John Doe"
+                    if len(k_words) > 1 and k_words[-1] == text_lower:
+                        dominated = True
+                        break
+
+                # Abbreviation with trailing dot: "Calif." dominated by "California"
+                if text.endswith('.') and len(text_no_dot) >= 3:
+                    if k_lower.startswith(text_no_dot) and len(k_lower) > len(text_no_dot):
+                        dominated = True
+                        break
+
+                # ORG/GPE: pure prefix collapse ("Google" dominated by "Google LLC")
+                if label in ("ORG", "GPE"):
+                    if k_lower.startswith(text_lower + ' ') or text_lower.startswith(k_lower + ' '):
+                        # Keep the shorter canonical form only if it's strictly a prefix
+                        if k_lower.startswith(text_lower + ' '):
+                            dominated = True
+                            break
+
+            if not dominated:
+                kept.append(text)
+
+        for t in kept:
+            result.append((t, label))
+
+    return result
+
+
+DEFAULT_TOPIC_TAGS = [
+    "Breaking News",
+    "Politics",
+    "Technology",
+    "Business & Finance",
+    "Science",
+    "Sports",
+    "Opinion",
+    "Health",
+    "World Affairs",
+    "Environment",
+]
+
+# In-memory cache: tag_id -> L2-normalized float32 embedding
+_tag_embedding_cache: dict[int, "np.ndarray"] = {}
+
+
+def _compute_tag_embedding(tag_id: int, tag_name: str) -> "np.ndarray":
+    """Return a cached L2-normalized embedding for a topic tag phrase."""
+    if tag_id not in _tag_embedding_cache:
+        model = get_embedding_model()
+        emb = model.encode(f"This article is about {tag_name}.").astype(np.float32)
+        norm = np.linalg.norm(emb)
+        if norm > 0:
+            emb = emb / norm
+        _tag_embedding_cache[tag_id] = emb
+    return _tag_embedding_cache[tag_id]
+
+
+def invalidate_tag_embedding(tag_id: int) -> None:
+    _tag_embedding_cache.pop(tag_id, None)
+
+
+def process_article_topic_tags(article_id: int, article_emb: "np.ndarray", session: Session) -> None:
+    """Assign active TopicTags to an article using hybrid cosine/classifier inference.
+
+    Manual assignments (is_manual=True) are preserved — only auto-inferred rows
+    are cleared and re-computed.  Once a tag has MIN_POSITIVE_FOR_INFERENCE
+    positive examples the trained classifier is used instead of cosine similarity.
+    """
+    tags = session.exec(select(TopicTag).where(TopicTag.is_active == True)).all()
+    if not tags:
+        return
+
+    norm = np.linalg.norm(article_emb)
+    art_norm = article_emb / norm if norm > 0 else article_emb
+
+    # Only clear auto-inferred rows; preserve manual user assignments
+    # Also delete rows where is_manual IS NULL (pre-migration rows)
+    session.execute(
+        text("DELETE FROM articletopiactag WHERE article_id = :aid AND (is_manual = 0 OR is_manual IS NULL)"),
+        {"aid": article_id},
+    )
+
+    # Collect tag_ids that have a manual assignment so we skip auto-inference for them
+    manual_tag_ids = {
+        row.tag_id for row in session.exec(
+            select(ArticleTopicTag)
+            .where(ArticleTopicTag.article_id == article_id)
+            .where(ArticleTopicTag.is_manual == True)
+        ).all()
+    }
+
+    for tag in tags:
+        if tag.id in manual_tag_ids:
+            continue
+
+        clf = _load_topic_clf(tag.id, session)
+        if clf.is_ready:
+            # Personalized: use the trained classifier
+            if clf.predict(art_norm) == 1:
+                session.add(ArticleTopicTag(article_id=article_id, tag_id=tag.id, score=1.0, is_manual=False))
+        else:
+            # Cold-start: fall back to cosine similarity
+            tag_emb = _compute_tag_embedding(tag.id, tag.name)
+            score = float(np.dot(art_norm, tag_emb))
+            if score >= tag.threshold:
+                session.add(ArticleTopicTag(article_id=article_id, tag_id=tag.id, score=score, is_manual=False))
+
+
+# ---------------------------------------------------------------------------
+# Personal-tag classifier
+# ---------------------------------------------------------------------------
+
+DEFAULT_USER_ID = "default"
+MIN_POSITIVE_FOR_INFERENCE = 3   # cold-start gate
+
+
+class TopicTagClassifier:
+    """
+    Incremental linear SVM (SGDClassifier/hinge) trained on 384-d MiniLM
+    embeddings.  Each instance is associated with one TopicTag row.
+
+    The MiniLM model is NEVER touched here; we only consume its output vectors.
+
+    Serialization: the full state is packed with joblib into a compact bytes
+    blob stored in TopicTag.model_data.
+    """
+
+    def __init__(self) -> None:
+        self.clf = SGDClassifier(
+            loss="hinge",
+            alpha=0.01,
+            max_iter=1,
+            tol=None,
+            random_state=42,
+        )
+        self.positive_count: int = 0
+        self.negative_count: int = 0
+
+    @property
+    def is_ready(self) -> bool:
+        """Cold-start gate — classifier must have MIN_POSITIVE_FOR_INFERENCE positive examples."""
+        return self.positive_count >= MIN_POSITIVE_FOR_INFERENCE
+
+    def train(self, embedding: "np.ndarray", label: int) -> None:
+        self.clf.partial_fit(X=[embedding], y=[label], classes=[0, 1])
+        if label == 1:
+            self.positive_count += 1
+        else:
+            self.negative_count += 1
+
+    def predict(self, embedding: "np.ndarray") -> int:
+        if not self.is_ready:
+            return 0
+        return int(self.clf.predict([embedding])[0])
+
+    def serialize(self) -> bytes:
+        buf = io.BytesIO()
+        joblib.dump(
+            {"clf": self.clf, "positive_count": self.positive_count, "negative_count": self.negative_count},
+            buf, compress=3,
+        )
+        return buf.getvalue()
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> "TopicTagClassifier":
+        buf = io.BytesIO(data)
+        state = joblib.load(buf)
+        obj = cls.__new__(cls)
+        obj.clf = state["clf"]
+        obj.positive_count = state["positive_count"]
+        obj.negative_count = state["negative_count"]
+        return obj
+
+
+# In-memory cache: tag_id -> TopicTagClassifier
+_topic_clf_cache: dict[int, TopicTagClassifier] = {}
+
+
+def _load_topic_clf(tag_id: int, session: Session) -> TopicTagClassifier:
+    """Return the TopicTagClassifier for a given TopicTag id, loading from DB on miss."""
+    if tag_id in _topic_clf_cache:
+        return _topic_clf_cache[tag_id]
+    row = session.get(TopicTag, tag_id)
+    clf = TopicTagClassifier.deserialize(row.model_data) if (row and row.model_data) else TopicTagClassifier()
+    _topic_clf_cache[tag_id] = clf
+    return clf
+
+
+def _save_topic_clf(tag_id: int, clf: TopicTagClassifier, session: Session) -> None:
+    """Persist the classifier to TopicTag.model_data and refresh the cache."""
+    row = session.get(TopicTag, tag_id)
+    if row is None:
+        return
+    row.model_data = clf.serialize()
+    row.positive_count = clf.positive_count
+    row.negative_count = clf.negative_count
+    session.add(row)
+    _topic_clf_cache[tag_id] = clf
+
+
+def train_topic_tag_feedback(
+    tag_id: int,
+    article_id: int,
+    label: int,  # 1 = tag applies, 0 = negative correction
+    session: Session,
+) -> None:
+    """
+    Record user feedback on a topic tag assignment and update the classifier.
+
+    label=1: tag applies → add/update ArticleTopicTag as manual, train positive.
+    label=0: negative correction → remove ArticleTopicTag, train negative.
+    """
+    ae = session.exec(
+        select(ArticleEmbedding).where(ArticleEmbedding.article_id == article_id)
+    ).first()
+    if ae is None:
+        logger.warning(f"[TopicTag] No embedding for article {article_id}, skipping train")
+        return
+
+    embedding = np.frombuffer(ae.embedding, dtype=np.float32).copy()
+
+    clf = _load_topic_clf(tag_id, session)
+    clf.train(embedding, label)
+    _save_topic_clf(tag_id, clf, session)
+
+    existing = session.exec(
+        select(ArticleTopicTag)
+        .where(ArticleTopicTag.article_id == article_id)
+        .where(ArticleTopicTag.tag_id == tag_id)
+    ).first()
+
+    if label == 0:
+        if existing:
+            session.delete(existing)
+    else:
+        if existing:
+            existing.is_manual = True
+            session.add(existing)
+        else:
+            session.add(ArticleTopicTag(
+                article_id=article_id,
+                tag_id=tag_id,
+                score=1.0,
+                is_manual=True,
+            ))
+
+
 def process_article_nlp(article: CachedArticle, session: Session) -> None:
     """
     Run TextBlob sentiment, spaCy NER, and MiniLM embedding for a CachedArticle.
@@ -1345,22 +1800,20 @@ def process_article_nlp(article: CachedArticle, session: Session) -> None:
     except Exception as e:
         logger.warning(f"[NLP] TextBlob failed for article {article.id}: {e}")
 
-    # 2. spaCy NER — PERSON / ORG / GPE only, deduplicated
+    # 2. spaCy NER — PERSON / ORG / GPE only, deduplicated and quality-filtered
     try:
         nlp = get_spacy_model()
         doc = nlp(article_text[:10000])
-        seen: set = set()
-        for ent in doc.ents:
-            if ent.label_ not in ("PERSON", "ORG", "GPE"):
-                continue
-            key = (ent.text.strip(), ent.label_)
-            if key in seen:
-                continue
-            seen.add(key)
+        raw_pairs: List[Tuple[str, str]] = [
+            (_normalize_entity_text(ent.text), ent.label_)
+            for ent in doc.ents
+            if ent.label_ in ("PERSON", "ORG", "GPE") and is_valid_entity(ent.text)
+        ]
+        for entity_text, entity_label in deduplicate_entities(raw_pairs):
             session.add(ArticleEntity(
                 article_id=article.id,
-                entity_text=ent.text.strip(),
-                entity_label=ent.label_,
+                entity_text=entity_text,
+                entity_label=entity_label,
             ))
     except Exception as e:
         logger.warning(f"[NLP] spaCy NER failed for article {article.id}: {e}")
@@ -1383,6 +1836,13 @@ def process_article_nlp(article: CachedArticle, session: Session) -> None:
             "INSERT INTO vec_cached_articles(rowid, embedding, article_id) "
             "VALUES (:rid, :emb, :aid)"
         ), {"rid": article.id, "emb": blob, "aid": article.id})
+
+        # Topic tagging uses the same normalized embedding
+        try:
+            process_article_topic_tags(article.id, emb.astype(np.float32), session)
+        except Exception as te:
+            logger.warning(f"[NLP] Topic tagging failed for article {article.id}: {te}")
+
     except Exception as e:
         logger.warning(f"[NLP] Embedding failed for article {article.id}: {e}")
 
@@ -1603,6 +2063,14 @@ async def lifespan(app: FastAPI):
         if not session.exec(select(Category).where(Category.name == "AI Digest")).first():
             session.add(Category(name="AI Digest"))
             session.commit()
+
+    # Initialize default topic tags if none exist
+    with Session(engine) as session:
+        if not session.exec(select(TopicTag)).first():
+            for name in DEFAULT_TOPIC_TAGS:
+                session.add(TopicTag(name=name, threshold=0.30))
+            session.commit()
+            logger.info("[TopicTag] Default topic tags initialized.")
 
     # --- Demo Mode: import OPML and take snapshot on first boot ---
     _demo_mode_boot = os.environ.get("DEMO_MODE", "false").lower() == "true"
@@ -2462,6 +2930,25 @@ async def api_import_subscriptions_opml(request: Request, file: UploadFile = Fil
     return {"imported": len(feeds_to_import)}
 
 
+# --- Entities ---
+
+@app.get("/api/entities/popular")
+def api_entities_popular(limit: int = 150):
+    """Return the most frequently occurring entity texts across all articles."""
+    with Session(engine) as session:
+        rows = session.execute(
+            text("""
+                SELECT entity_text, entity_label, COUNT(*) as cnt
+                FROM articleentity
+                GROUP BY entity_text, entity_label
+                ORDER BY cnt DESC
+                LIMIT :limit
+            """),
+            {"limit": limit},
+        ).fetchall()
+    return [{"text": r[0], "label": r[1], "count": r[2]} for r in rows]
+
+
 # --- Articles ---
 
 @app.get("/api/articles")
@@ -2488,6 +2975,28 @@ def api_get_articles(category_id: str = "all", feed_id: str = None, limit: int =
         elif category_id != "all":
             query = query.where(CachedArticle.category_id == int(category_id))
         db_articles = session.exec(query).all()
+        # Bulk-fetch entities for all returned articles in one query
+        article_ids = [a.id for a in db_articles]
+        entities_by_article: dict = {}
+        topic_tags_by_article: dict = {}
+        if article_ids:
+            all_ents = session.exec(
+                select(ArticleEntity).where(ArticleEntity.article_id.in_(article_ids))
+            ).all()
+            for ent in all_ents:
+                entities_by_article.setdefault(ent.article_id, []).append(
+                    {"text": ent.entity_text, "label": ent.entity_label}
+                )
+            # Topic tags — manual assignments first (score=1.0), then auto by score desc
+            tt_rows = session.exec(
+                select(ArticleTopicTag, TopicTag)
+                .join(TopicTag, TopicTag.id == ArticleTopicTag.tag_id)
+                .where(ArticleTopicTag.article_id.in_(article_ids))
+                .where(TopicTag.is_active == True)
+                .order_by(ArticleTopicTag.is_manual.desc(), ArticleTopicTag.score.desc())
+            ).all()
+            for att, tag in tt_rows:
+                topic_tags_by_article.setdefault(att.article_id, []).append(tag.name)
         result = []
         for a in db_articles:
             art_dict = a.model_dump(exclude={"scraped_content"})
@@ -2497,6 +3006,9 @@ def api_get_articles(category_id: str = "all", feed_id: str = None, limit: int =
             art_dict['published_str'] = dt.strftime("%b %d, %H:%M")
             art_dict['auto_scrape'] = sub_auto_scrape.get(a.feed_id, False)
             art_dict['has_scraped_content'] = a.scraped_content is not None
+            art_dict['entities'] = entities_by_article.get(a.id, [])[:6]
+            art_dict['topic_tags'] = topic_tags_by_article.get(a.id, [])
+            art_dict['personal_tags'] = []  # Merged into topic_tags
             result.append(art_dict)
         return result
 
@@ -3097,6 +3609,176 @@ async def api_update_settings(request: Request):
         session.add(settings)
         session.commit()
     return {"ok": True}
+
+@app.get("/api/settings/topic-tags")
+def api_list_topic_tags():
+    with Session(engine) as session:
+        tags = session.exec(select(TopicTag).order_by(TopicTag.created_at)).all()
+        return [
+            {
+                "id": t.id,
+                "name": t.name,
+                "threshold": t.threshold,
+                "is_active": t.is_active,
+                "positive_count": t.positive_count or 0,
+                "negative_count": t.negative_count or 0,
+                "is_ready": (t.positive_count or 0) >= MIN_POSITIVE_FOR_INFERENCE,
+            }
+            for t in tags
+        ]
+
+@app.post("/api/settings/topic-tags/retag")
+def api_retag_articles():
+    """Re-run topic tagging on all articles that have embeddings (background thread)."""
+    from threading import Thread
+    def _run():
+        with Session(engine) as session:
+            rows = session.exec(select(ArticleEmbedding)).all()
+            logger.info(f"[TopicTag] Re-tagging {len(rows)} articles...")
+            for i, ae in enumerate(rows):
+                try:
+                    emb = np.frombuffer(ae.embedding, dtype=np.float32).copy()
+                    process_article_topic_tags(ae.article_id, emb, session)
+                except Exception as e:
+                    logger.warning(f"[TopicTag] Retag failed for article {ae.article_id}: {e}")
+                if i % 200 == 199:
+                    try:
+                        session.commit()
+                    except Exception as ce:
+                        logger.error(f"[TopicTag] Batch commit failed: {ce}")
+                        session.rollback()
+            try:
+                session.commit()
+            except Exception as ce:
+                logger.error(f"[TopicTag] Final commit failed: {ce}")
+        logger.info("[TopicTag] Re-tagging complete.")
+    Thread(target=_run).start()
+    return {"ok": True}
+
+@app.post("/api/settings/topic-tags")
+async def api_create_topic_tag(request: Request):
+    data = await request.json()
+    name = data.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name required")
+    threshold = max(0.05, min(0.99, float(data.get("threshold", 0.30))))
+    with Session(engine) as session:
+        if session.exec(select(TopicTag).where(TopicTag.name == name)).first():
+            raise HTTPException(status_code=409, detail="Tag already exists")
+        tag = TopicTag(name=name, threshold=threshold)
+        session.add(tag)
+        session.commit()
+        session.refresh(tag)
+        return {
+            "id": tag.id, "name": tag.name, "threshold": tag.threshold, "is_active": tag.is_active,
+            "positive_count": tag.positive_count or 0, "negative_count": tag.negative_count or 0,
+            "is_ready": (tag.positive_count or 0) >= MIN_POSITIVE_FOR_INFERENCE,
+        }
+
+@app.patch("/api/settings/topic-tags/{tag_id}")
+async def api_update_topic_tag(tag_id: int, request: Request):
+    data = await request.json()
+    with Session(engine) as session:
+        tag = session.get(TopicTag, tag_id)
+        if not tag:
+            raise HTTPException(status_code=404)
+        if "name" in data:
+            tag.name = data["name"].strip()
+            invalidate_tag_embedding(tag_id)
+        if "threshold" in data:
+            tag.threshold = max(0.05, min(0.99, float(data["threshold"])))
+        if "is_active" in data:
+            tag.is_active = bool(data["is_active"])
+        session.add(tag)
+        session.commit()
+        return {
+            "id": tag.id, "name": tag.name, "threshold": tag.threshold, "is_active": tag.is_active,
+            "positive_count": tag.positive_count or 0, "negative_count": tag.negative_count or 0,
+            "is_ready": (tag.positive_count or 0) >= MIN_POSITIVE_FOR_INFERENCE,
+        }
+
+@app.delete("/api/settings/topic-tags/{tag_id}")
+def api_delete_topic_tag(tag_id: int):
+    with Session(engine) as session:
+        tag = session.get(TopicTag, tag_id)
+        if not tag:
+            raise HTTPException(status_code=404)
+        session.execute(text("DELETE FROM articletopiactag WHERE tag_id = :tid"), {"tid": tag_id})
+        session.delete(tag)
+        session.commit()
+    invalidate_tag_embedding(tag_id)
+    _topic_clf_cache.pop(tag_id, None)
+    return Response(status_code=204)
+
+@app.get("/api/personal-tags")
+def api_list_personal_tags():
+    """Return all topic tags with classifier training statistics."""
+    with Session(engine) as session:
+        rows = session.exec(select(TopicTag).order_by(TopicTag.created_at)).all()
+        return [
+            {
+                "tag_name": r.name,
+                "positive_count": r.positive_count or 0,
+                "negative_count": r.negative_count or 0,
+                "is_ready": (r.positive_count or 0) >= MIN_POSITIVE_FOR_INFERENCE,
+            }
+            for r in rows
+        ]
+
+@app.post("/api/personal-tags/train")
+async def api_train_personal_tag(request: Request):
+    """
+    Record user feedback on a topic tag assignment and update the classifier.
+    Looks up the TopicTag by name, creating it if it doesn't yet exist.
+
+    Body:
+      article_id  – integer ID of the CachedArticle
+      tag_name    – the tag label
+      label       – 1 (tag applies) or 0 (negative correction / remove tag)
+    """
+    data = await request.json()
+    try:
+        article_id = int(data["article_id"])
+    except (KeyError, ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="article_id required")
+    tag_name = str(data.get("tag_name", "")).strip()
+    if not tag_name:
+        raise HTTPException(status_code=400, detail="tag_name required")
+    label = int(data.get("label", 1))
+    if label not in (0, 1):
+        raise HTTPException(status_code=400, detail="label must be 0 or 1")
+
+    with Session(engine) as session:
+        # Look up or create the TopicTag by name
+        tag = session.exec(select(TopicTag).where(TopicTag.name == tag_name)).first()
+        if tag is None:
+            tag = TopicTag(name=tag_name, threshold=0.30, is_active=True)
+            session.add(tag)
+            session.flush()
+            _tag_embedding_cache.pop(tag.id, None)  # ensure fresh embedding on first use
+
+        train_topic_tag_feedback(tag.id, article_id, label, session)
+        session.commit()
+
+    return {"ok": True}
+
+@app.delete("/api/personal-tags/{tag_name}")
+def api_delete_personal_tag(tag_name: str):
+    """
+    Permanently delete a topic tag definition (by name) and remove all its article assignments.
+    """
+    with Session(engine) as session:
+        tag = session.exec(select(TopicTag).where(TopicTag.name == tag_name)).first()
+        if tag:
+            session.execute(
+                text("DELETE FROM articletopiactag WHERE tag_id = :tid"),
+                {"tid": tag.id},
+            )
+            _tag_embedding_cache.pop(tag.id, None)
+            _topic_clf_cache.pop(tag.id, None)
+            session.delete(tag)
+            session.commit()
+    return Response(status_code=204)
 
 @app.post("/api/settings/test_llm")
 async def api_test_llm(request: Request):

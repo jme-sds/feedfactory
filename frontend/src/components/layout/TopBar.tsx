@@ -4,12 +4,14 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useRef } from "react";
-import { BookOpen, Layers, Settings, MoreVertical, RefreshCw, Plus, Upload, Download, X } from "lucide-react";
+import { BookOpen, Layers, Settings, MoreVertical, RefreshCw, Plus, Upload, Download, X, Tag } from "lucide-react";
 import { articles, subscriptions, categories } from "@/lib/api";
 import { useQueryClient, useQuery } from "@tanstack/react-query";
+import { useReaderStore } from "@/lib/store";
 
 export default function TopBar() {
   const pathname = usePathname();
+  const { tagBrowseMode, setTagBrowseMode } = useReaderStore();
   const [menuOpen, setMenuOpen] = useState(false);
   const [addFeedOpen, setAddFeedOpen] = useState(false);
   const [addCategoryOpen, setAddCategoryOpen] = useState(false);
@@ -125,6 +127,15 @@ export default function TopBar() {
             <span className="hidden sm:block">Syncing...</span>
           </div>
         )}
+
+        {/* Tag browse toggle */}
+        <button
+          onClick={() => setTagBrowseMode(!tagBrowseMode)}
+          title={tagBrowseMode ? "Browse by category" : "Browse by tag"}
+          className={`p-1.5 rounded-md transition-colors ${tagBrowseMode ? "text-primary bg-primary/10" : "text-muted hover:text-white hover:bg-white/5"}`}
+        >
+          <Tag size={16} />
+        </button>
 
         {/* Global menu */}
         <div className="relative">

@@ -1,20 +1,33 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { categories, collections, type Category } from "@/lib/api";
+import { categories, collections, topicTags, entities, type Category, type TopicTag, type EntityStat } from "@/lib/api";
 import { useReaderStore } from "@/lib/store";
 import { MoreVertical, Trash2, Pencil, Plus, CheckCheck, Star, Layers } from "lucide-react";
 import { useState } from "react";
 
 export default function CategoryGrid() {
   const qc = useQueryClient();
-  const { selectCategory, selectedCategoryId } = useReaderStore();
+  const { selectCategory, selectedCategoryId, tagBrowseMode, selectedTagFilter, selectTagFilter, selectedEntityFilter, selectEntityFilter } = useReaderStore();
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["categories"],
     queryFn: categories.list,
     refetchInterval: 60_000,
+  });
+
+  const { data: tagList = [] } = useQuery({
+    queryKey: ["topic-tags"],
+    queryFn: topicTags.list,
+    enabled: tagBrowseMode,
+  });
+
+  const { data: entityList = [] } = useQuery({
+    queryKey: ["entities-popular"],
+    queryFn: () => entities.popular(150),
+    enabled: tagBrowseMode,
+    staleTime: 5 * 60_000,
   });
 
   const handleMarkRead = async (id: string) => {
@@ -64,10 +77,40 @@ export default function CategoryGrid() {
     }
   };
 
-  if (isLoading) {
+  if (isLoading && !tagBrowseMode) {
     return (
       <div className="flex items-center justify-center py-12">
         <div className="spinner" />
+      </div>
+    );
+  }
+
+  // Tag browse mode: show TopicTag tiles then entity tiles
+  if (tagBrowseMode) {
+    const activeTags = tagList.filter((t) => t.is_active);
+    return (
+      <div className="tile-grid">
+        {activeTags.length === 0 && entityList.length === 0 && (
+          <p className="col-span-full text-xs text-muted text-center py-8">
+            No active topic tags. Add tags in Settings.
+          </p>
+        )}
+        {activeTags.map((tag) => (
+          <TagTile
+            key={tag.id}
+            tag={tag}
+            isSelected={selectedTagFilter === tag.name && !selectedEntityFilter}
+            onClick={() => selectTagFilter(selectedTagFilter === tag.name ? null : tag.name)}
+          />
+        ))}
+        {entityList.map((ent) => (
+          <EntityTile
+            key={ent.text}
+            entity={ent}
+            isSelected={selectedEntityFilter === ent.text}
+            onClick={() => selectEntityFilter(selectedEntityFilter === ent.text ? null : ent.text)}
+          />
+        ))}
       </div>
     );
   }
@@ -184,6 +227,51 @@ export default function CategoryGrid() {
         <Tile id="none" name="Uncategorized" unread={uncategorized_unread} isActive={selectedCategoryId === "none"} />
       )}
     </div>
+  );
+}
+
+function TagTile({ tag, isSelected, onClick }: { tag: TopicTag; isSelected: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left ${
+        isSelected
+          ? "border-yellow-400/60 bg-yellow-400/10"
+          : "border-yellow-400/20 bg-yellow-400/5 hover:border-yellow-400/40 hover:bg-yellow-400/10"
+      }`}
+    >
+      <div className="flex items-center gap-1.5">
+        <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-yellow-400" />
+        <span className="font-medium text-sm text-yellow-200 line-clamp-2">{tag.name}</span>
+      </div>
+      {tag.is_ready && (
+        <span className="mt-1 text-xs text-yellow-400/70">✦ personalized</span>
+      )}
+    </button>
+  );
+}
+
+const ENTITY_LABEL_COLOR: Record<string, string> = {
+  PERSON: "text-sky-300",
+  ORG: "text-violet-300",
+  GPE: "text-emerald-300",
+};
+
+function EntityTile({ entity, isSelected, onClick }: { entity: EntityStat; isSelected: boolean; onClick: () => void }) {
+  const dotColor = entity.label === "PERSON" ? "bg-sky-400" : entity.label === "ORG" ? "bg-violet-400" : "bg-emerald-400";
+  const borderSelected = entity.label === "PERSON" ? "border-sky-400/60 bg-sky-400/10" : entity.label === "ORG" ? "border-violet-400/60 bg-violet-400/10" : "border-emerald-400/60 bg-emerald-400/10";
+  const borderIdle = entity.label === "PERSON" ? "border-sky-400/20 bg-sky-400/5 hover:border-sky-400/40 hover:bg-sky-400/10" : entity.label === "ORG" ? "border-violet-400/20 bg-violet-400/5 hover:border-violet-400/40 hover:bg-violet-400/10" : "border-emerald-400/20 bg-emerald-400/5 hover:border-emerald-400/40 hover:bg-emerald-400/10";
+  return (
+    <button
+      onClick={onClick}
+      className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left ${isSelected ? borderSelected : borderIdle}`}
+    >
+      <div className="flex items-center gap-1.5">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
+        <span className={`font-medium text-sm line-clamp-2 ${ENTITY_LABEL_COLOR[entity.label] ?? ""}`}>{entity.text}</span>
+      </div>
+      <span className="mt-1 text-xs opacity-40">{entity.label}</span>
+    </button>
   );
 }
 

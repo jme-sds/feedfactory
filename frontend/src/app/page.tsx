@@ -12,7 +12,7 @@ import { auth } from "@/lib/api";
 import { useRouter } from "next/navigation";
 
 export default function ReaderPage() {
-  const { mobileView, selectedArticle, selectedFeedId, goBackToCategories } = useReaderStore();
+  const { mobileView, selectedArticle, selectedFeedId, tagBrowseMode, selectedTagFilter, selectedEntityFilter, goBackToCategories } = useReaderStore();
   const router = useRouter();
 
   useEffect(() => {
@@ -39,6 +39,12 @@ export default function ReaderPage() {
             <CategoryGrid />
           </div>
         )}
+        {/* Tag browse stream (mobile): shown when a tag is selected in tag browse mode */}
+        {mobileView === "stream" && tagBrowseMode && !selectedFeedId && (
+          <div className="h-full overflow-hidden flex flex-col">
+            <ArticleStream />
+          </div>
+        )}
         {mobileView === "feeds" && (
           <div className="h-full flex flex-col">
             <FeedGrid />
@@ -56,7 +62,34 @@ export default function ReaderPage() {
 
       {/* Desktop: progressive disclosure */}
       <div className="hidden lg:flex flex-1 overflow-hidden mt-12">
-        {mobileView === "categories" ? (
+        {tagBrowseMode ? (
+          // Tag browse mode: CategoryGrid (tag tiles) + ArticleStream (if tag selected) + ArticlePanel
+          <>
+            <div className="w-96 shrink-0 border-r border-border overflow-y-auto">
+              <CategoryGrid />
+            </div>
+            {(selectedTagFilter || selectedEntityFilter) ? (
+              <>
+                <div className="w-80 shrink-0 border-r border-border overflow-hidden flex flex-col">
+                  <ArticleStream />
+                </div>
+                <div className="flex-1 overflow-hidden">
+                  {selectedArticle ? (
+                    <ArticlePanel />
+                  ) : (
+                    <div className="flex items-center justify-center h-full">
+                      <p className="text-sm text-muted">Select an article to read</p>
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="flex-1 flex items-center justify-center">
+                <p className="text-sm text-muted">Select a tag to browse articles</p>
+              </div>
+            )}
+          </>
+        ) : mobileView === "categories" ? (
           // State 1: no feed drill-down — categories + (article if open, else placeholder)
           <>
             <div className="w-96 shrink-0 border-r border-border overflow-y-auto">

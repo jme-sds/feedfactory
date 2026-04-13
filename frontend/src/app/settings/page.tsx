@@ -1,13 +1,184 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { settings, type Settings } from "@/lib/api";
+import { settings, topicTags as topicTagsApi, type Settings, type TopicTag } from "@/lib/api";
 import TopBar from "@/components/layout/TopBar";
 import BottomNav from "@/components/layout/BottomNav";
-import { ChevronDown, ChevronRight, Check, Zap, Upload } from "lucide-react";
+import { ChevronDown, ChevronRight, Check, Zap, Upload, Plus, Trash2, RefreshCw, Tag } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/api";
+
+function TopicTagsSection({ openSection, setOpenSection }: { openSection: string; setOpenSection: (id: string) => void }) {
+  const qc = useQueryClient();
+  const [newName, setNewName] = useState("");
+  const [newThreshold, setNewThreshold] = useState("0.30");
+  const [retagging, setRetagging] = useState(false);
+
+  const { data: tags = [], isLoading } = useQuery({
+    queryKey: ["topic-tags"],
+    queryFn: topicTagsApi.list,
+  });
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newName.trim()) return;
+    try {
+      await topicTagsApi.create(newName.trim(), parseFloat(newThreshold) || 0.30);
+      setNewName("");
+      setNewThreshold("0.30");
+      qc.invalidateQueries({ queryKey: ["topic-tags"] });
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleToggle = async (tag: TopicTag) => {
+    await topicTagsApi.update(tag.id, { is_active: !tag.is_active });
+    qc.invalidateQueries({ queryKey: ["topic-tags"] });
+  };
+
+  const handleThresholdBlur = async (tag: TopicTag, value: string) => {
+    const parsed = parseFloat(value);
+    if (isNaN(parsed) || parsed === tag.threshold) return;
+    await topicTagsApi.update(tag.id, { threshold: parsed });
+    qc.invalidateQueries({ queryKey: ["topic-tags"] });
+  };
+
+  const handleDelete = async (tag: TopicTag) => {
+    if (!confirm(`Delete tag "${tag.name}"? It will be removed from all articles.`)) return;
+    await topicTagsApi.delete(tag.id);
+    qc.invalidateQueries({ queryKey: ["topic-tags"] });
+  };
+
+  const handleRetag = async () => {
+    setRetagging(true);
+    try {
+      await topicTagsApi.retag();
+      alert("Re-tagging started in background. Refresh articles in a moment.");
+    } catch (err: any) {
+      alert(err.message);
+    }
+    setRetagging(false);
+  };
+
+  return (
+    <Section id="topic-tags" title="Topic Tags" openSection={openSection} setOpenSection={setOpenSection}>
+      <p className="text-xs text-muted">
+        Tags applied automatically using semantic similarity (MiniLM). Use the + / × buttons in the article reader to correct tags — the system learns your preferences over time (✦ appears once a tag has enough feedback to personalize).
+      </p>
+
+      {isLoading ? (
+        <div className="flex justify-center py-4"><div className="spinner" /></div>
+      ) : (
+        <div className="space-y-1.5">
+          {tags.map((tag) => (
+            <TopicTagRow
+              key={tag.id}
+              tag={tag}
+              onToggle={() => handleToggle(tag)}
+              onThresholdBlur={(v) => handleThresholdBlur(tag, v)}
+              onDelete={() => handleDelete(tag)}
+            />
+          ))}
+        </div>
+      )}
+
+      <form onSubmit={handleCreate} className="flex gap-2 items-end pt-1">
+        <div className="flex-1">
+          <label className="block text-xs text-muted mb-1">New tag name</label>
+          <input
+            type="text"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="e.g. Climate Change"
+            className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+          />
+        </div>
+        <div className="w-24">
+          <label className="block text-xs text-muted mb-1">Threshold</label>
+          <input
+            type="number"
+            value={newThreshold}
+            onChange={(e) => setNewThreshold(e.target.value)}
+            step="0.01" min="0.05" max="0.99"
+            className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+          />
+        </div>
+        <button type="submit" className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover shrink-0">
+          <Plus size={14} /> Add
+        </button>
+      </form>
+
+      <button
+        onClick={handleRetag}
+        disabled={retagging}
+        className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border text-sm hover:bg-white/5 transition-colors disabled:opacity-50"
+      >
+        <RefreshCw size={14} className={retagging ? "animate-spin" : ""} />
+        {retagging ? "Starting..." : "Re-tag All Existing Articles"}
+      </button>
+    </Section>
+  );
+}
+
+function TopicTagRow({
+  tag,
+  onToggle,
+  onThresholdBlur,
+  onDelete,
+}: {
+  tag: TopicTag;
+  onToggle: () => void;
+  onThresholdBlur: (v: string) => void;
+  onDelete: () => void;
+}) {
+  const [localThreshold, setLocalThreshold] = useState(String(tag.threshold));
+
+  useEffect(() => {
+    setLocalThreshold(String(tag.threshold));
+  }, [tag.threshold]);
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-surface/40">
+      <button
+        type="button"
+        onClick={onToggle}
+        className={`w-8 h-4 rounded-full transition-colors shrink-0 ${tag.is_active ? "bg-primary" : "bg-white/10"}`}
+        title={tag.is_active ? "Active — click to disable" : "Inactive — click to enable"}
+      >
+        <span className={`block w-3 h-3 bg-white rounded-full transition-transform mx-0.5 ${tag.is_active ? "translate-x-4" : "translate-x-0"}`} />
+      </button>
+      <div className="flex items-center gap-1.5 flex-1 min-w-0">
+        <Tag size={12} className="text-yellow-400 shrink-0" />
+        <span className="text-sm truncate">{tag.name}</span>
+        {tag.is_ready ? (
+          <span className="text-xs text-primary shrink-0" title={`Personalized: ${tag.positive_count}+ / ${tag.negative_count}−`}>
+            ✦ {tag.positive_count}+
+          </span>
+        ) : tag.positive_count > 0 ? (
+          <span className="text-xs text-muted shrink-0" title={`Learning: ${tag.positive_count} of 3 needed`}>
+            {tag.positive_count}/3
+          </span>
+        ) : null}
+      </div>
+      <div className="flex items-center gap-1 shrink-0">
+        <label className="text-xs text-muted">min:</label>
+        <input
+          type="number"
+          value={localThreshold}
+          onChange={(e) => setLocalThreshold(e.target.value)}
+          onBlur={(e) => onThresholdBlur(e.target.value)}
+          step="0.01" min="0.05" max="0.99"
+          className="w-16 bg-background border border-border rounded px-2 py-1 text-xs focus:outline-none focus:border-primary"
+        />
+      </div>
+      <button onClick={onDelete} className="p-1 text-muted hover:text-danger transition-colors shrink-0">
+        <Trash2 size={14} />
+      </button>
+    </div>
+  );
+}
 
 function Section({
   id,
@@ -628,6 +799,9 @@ export default function SettingsPage() {
               <input type="number" value={form.pwa_offline_limit ?? 200} onChange={set("pwa_offline_limit")} className={inputClass} min={10} max={1000} />
             </div>
           </Section>
+
+          {/* Topic Tags */}
+          <TopicTagsSection openSection={openSection} setOpenSection={setOpenSection} />
 
           {/* Backup & Restore */}
           {!demoMode && (
