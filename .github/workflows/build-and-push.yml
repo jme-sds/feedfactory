@@ -3,6 +3,13 @@ name: build and push
 on:
   push:
     branches: [ "main" ]
+    paths-ignore:
+      - "README.md"
+      - "CLAUDE.md"
+      - ".env.example"
+      - "LICENSE"
+      - ".gitignore"
+      - "docs/**"
 
 jobs:
   build-backend:
