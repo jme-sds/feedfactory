@@ -124,10 +124,10 @@ export default function CategoryGrid() {
   const Tile = ({ id, name, unread, isActive }: { id: string; name: string; unread: number; isActive: boolean }) => (
     <button
       onClick={() => selectCategory(id)}
-      className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left ${
+      className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left glass-card ${
         isActive
-          ? "border-primary bg-primary/10"
-          : "border-border bg-surface hover:border-primary/40 hover:bg-white/5"
+          ? "border-primary/60 bg-primary/10 shadow-[0_0_12px_rgb(var(--primary)/0.2)]"
+          : "border-transparent hover:bg-white/8"
       }`}
     >
       <span className="font-medium text-sm line-clamp-2">{name}</span>
@@ -146,10 +146,10 @@ export default function CategoryGrid() {
       {favorites_count > 0 && (
         <button
           onClick={() => selectCategory("favorites")}
-          className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left ${
+          className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left glass-card ${
             selectedCategoryId === "favorites"
-              ? "border-yellow-400/60 bg-yellow-400/10"
-              : "border-yellow-400/20 bg-yellow-400/5 hover:border-yellow-400/40 hover:bg-yellow-400/10"
+              ? "border-yellow-400/60 bg-yellow-400/10 shadow-[0_0_12px_rgb(250_204_21/0.25)]"
+              : "border-transparent bg-yellow-400/5 hover:bg-yellow-400/10"
           }`}
         >
           <div className="flex items-center gap-1.5">
@@ -167,10 +167,10 @@ export default function CategoryGrid() {
         <div className="relative">
           <button
             onClick={() => selectCategory(String(aiDigest.id))}
-            className={`w-full flex flex-col items-start p-3 rounded-xl border transition-all text-left ${
+            className={`w-full flex flex-col items-start p-3 rounded-xl border transition-all text-left glass-card ${
               selectedCategoryId === String(aiDigest.id)
-                ? "border-primary bg-primary/10"
-                : "border-primary/30 bg-primary/5 hover:border-primary/60 hover:bg-primary/10"
+                ? "border-primary/60 bg-primary/10 shadow-[0_0_12px_rgb(var(--primary)/0.2)]"
+                : "border-transparent bg-primary/5 hover:bg-primary/10"
             }`}
           >
             <span className="font-medium text-sm">✨ {aiDigest.name}</span>
@@ -197,10 +197,10 @@ export default function CategoryGrid() {
         <div key={cat.id} className="relative">
           <button
             onClick={() => selectCategory(String(cat.id))}
-            className={`w-full flex flex-col items-start p-3 rounded-xl border transition-all text-left ${
+            className={`w-full flex flex-col items-start p-3 rounded-xl border transition-all text-left glass-card ${
               selectedCategoryId === String(cat.id)
-                ? "border-primary bg-primary/10"
-                : "border-border bg-surface hover:border-primary/40 hover:bg-white/5"
+                ? "border-primary/60 bg-primary/10 shadow-[0_0_12px_rgb(var(--primary)/0.2)]"
+                : "border-transparent hover:bg-white/8"
             }`}
           >
             <span className="font-medium text-sm line-clamp-2">{cat.name}</span>
@@ -234,10 +234,10 @@ function TagTile({ tag, isSelected, onClick }: { tag: TopicTag; isSelected: bool
   return (
     <button
       onClick={onClick}
-      className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left ${
+      className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left glass-card ${
         isSelected
-          ? "border-yellow-400/60 bg-yellow-400/10"
-          : "border-yellow-400/20 bg-yellow-400/5 hover:border-yellow-400/40 hover:bg-yellow-400/10"
+          ? "border-yellow-400/60 bg-yellow-400/10 shadow-[0_0_12px_rgb(250_204_21/0.2)]"
+          : "border-transparent bg-yellow-400/5 hover:bg-yellow-400/10"
       }`}
     >
       <div className="flex items-center gap-1.5">
@@ -260,11 +260,11 @@ const ENTITY_LABEL_COLOR: Record<string, string> = {
 function EntityTile({ entity, isSelected, onClick }: { entity: EntityStat; isSelected: boolean; onClick: () => void }) {
   const dotColor = entity.label === "PERSON" ? "bg-sky-400" : entity.label === "ORG" ? "bg-violet-400" : "bg-emerald-400";
   const borderSelected = entity.label === "PERSON" ? "border-sky-400/60 bg-sky-400/10" : entity.label === "ORG" ? "border-violet-400/60 bg-violet-400/10" : "border-emerald-400/60 bg-emerald-400/10";
-  const borderIdle = entity.label === "PERSON" ? "border-sky-400/20 bg-sky-400/5 hover:border-sky-400/40 hover:bg-sky-400/10" : entity.label === "ORG" ? "border-violet-400/20 bg-violet-400/5 hover:border-violet-400/40 hover:bg-violet-400/10" : "border-emerald-400/20 bg-emerald-400/5 hover:border-emerald-400/40 hover:bg-emerald-400/10";
+  const borderIdle = entity.label === "PERSON" ? "border-transparent bg-sky-400/5 hover:bg-sky-400/10" : entity.label === "ORG" ? "border-transparent bg-violet-400/5 hover:bg-violet-400/10" : "border-transparent bg-emerald-400/5 hover:bg-emerald-400/10";
   return (
     <button
       onClick={onClick}
-      className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left ${isSelected ? borderSelected : borderIdle}`}
+      className={`relative flex flex-col items-start p-3 rounded-xl border transition-all text-left glass-card ${isSelected ? borderSelected : borderIdle}`}
     >
       <div className="flex items-center gap-1.5">
         <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
@@ -283,17 +283,17 @@ function CategoryMenu({ cat, onMarkRead, onRename, onDelete, onCreateCollection 
   onCreateCollection: () => void;
 }) {
   return (
-    <div className="absolute right-0 top-6 w-52 bg-surface border border-border rounded-lg shadow-xl py-1 z-50 text-sm">
-      <button onClick={onMarkRead} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5">
+    <div className="absolute right-0 top-6 w-52 glass-heavy rounded-xl shadow-2xl py-1 z-50 text-sm">
+      <button onClick={onMarkRead} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors">
         <CheckCheck size={14} /> Mark All Read
       </button>
-      <button onClick={onRename} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5">
+      <button onClick={onRename} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors">
         <Pencil size={14} /> Rename
       </button>
-      <button onClick={onCreateCollection} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5">
+      <button onClick={onCreateCollection} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors">
         <Layers size={14} /> Create Collection
       </button>
-      <button onClick={onDelete} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5 text-danger">
+      <button onClick={onDelete} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors text-danger">
         <Trash2 size={14} /> Delete
       </button>
     </div>

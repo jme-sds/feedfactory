@@ -26,7 +26,7 @@ export default function ReaderPage() {
   const showTopBar = mobileView === "categories";
 
   return (
-    <div className="flex flex-col h-screen bg-background">
+    <div className="flex flex-col h-screen">
       {/* TopBar: always on desktop, only on category grid on mobile */}
       <div className={showTopBar ? "" : "hidden lg:block"}>
         <TopBar />
@@ -65,12 +65,12 @@ export default function ReaderPage() {
         {tagBrowseMode ? (
           // Tag browse mode: CategoryGrid (tag tiles) + ArticleStream (if tag selected) + ArticlePanel
           <>
-            <div className="w-96 shrink-0 border-r border-border overflow-y-auto">
+            <div className="w-96 shrink-0 border-r border-white/6 overflow-y-auto">
               <CategoryGrid />
             </div>
             {(selectedTagFilter || selectedEntityFilter) ? (
               <>
-                <div className="w-80 shrink-0 border-r border-border overflow-hidden flex flex-col">
+                <div className="w-80 shrink-0 border-r border-white/6 overflow-hidden flex flex-col">
                   <ArticleStream />
                 </div>
                 <div className="flex-1 overflow-hidden">
@@ -92,7 +92,7 @@ export default function ReaderPage() {
         ) : mobileView === "categories" ? (
           // State 1: no feed drill-down — categories + (article if open, else placeholder)
           <>
-            <div className="w-96 shrink-0 border-r border-border overflow-y-auto">
+            <div className="w-96 shrink-0 border-r border-white/6 overflow-y-auto">
               <CategoryGrid />
             </div>
             <div className="flex-1 overflow-hidden">
@@ -108,7 +108,7 @@ export default function ReaderPage() {
         ) : !selectedFeedId ? (
           // State 2: category selected, no feed — feeds + (article if open, else placeholder)
           <>
-            <div className="w-96 shrink-0 border-r border-border overflow-hidden flex flex-col">
+            <div className="w-96 shrink-0 border-r border-white/6 overflow-hidden flex flex-col">
               <FeedGrid onBack={goBackToCategories} />
             </div>
             <div className="flex-1 overflow-hidden">
@@ -124,10 +124,10 @@ export default function ReaderPage() {
         ) : (
           // State 3+4: feed selected — feeds + stream + (article or placeholder)
           <>
-            <div className="w-96 shrink-0 border-r border-border overflow-hidden flex flex-col">
+            <div className="w-96 shrink-0 border-r border-white/6 overflow-hidden flex flex-col">
               <FeedGrid onBack={goBackToCategories} />
             </div>
-            <div className="w-80 shrink-0 border-r border-border overflow-hidden flex flex-col">
+            <div className="w-80 shrink-0 border-r border-white/6 overflow-hidden flex flex-col">
               <ArticleStream />
             </div>
             <div className="flex-1 overflow-hidden">

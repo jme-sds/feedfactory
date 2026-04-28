@@ -7,7 +7,7 @@ import { X, ExternalLink, BookOpen, Sparkles, ArrowLeft, CircleDot, CircleCheck,
 import { useState, useEffect, useRef } from "react";
 import { useQueryClient, useQuery } from "@tanstack/react-query";
 
-export default function ArticlePanel({ isModal = false }: { isModal?: boolean }) {
+export default function ArticlePanel({ isModal = false, onBack }: { isModal?: boolean; onBack?: () => void }) {
   const { selectedArticle, selectArticle, goBack } = useReaderStore();
   const qc = useQueryClient();
   const [readerHtml, setReaderHtml] = useState<string | null>(null);
@@ -213,27 +213,27 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
   const container = (
     <div className="flex flex-col h-full bg-background">
       {/* Controls bar */}
-      <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border bg-surface">
+      <div className="shrink-0 flex items-center gap-2 px-3 py-2 glass sticky top-0 border-b border-white/8 z-10">
         {isModal ? (
-          <button onClick={goBack} className="p-1.5 rounded-md text-muted hover:text-white hover:bg-white/5">
+          <button onClick={onBack ?? goBack} className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all">
             <ArrowLeft size={18} />
           </button>
         ) : (
-          <button onClick={() => selectArticle(null)} className="p-1.5 rounded-md text-muted hover:text-white hover:bg-white/5">
+          <button onClick={() => selectArticle(null)} className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all">
             <X size={18} />
           </button>
         )}
         <button
           onClick={handleToggleRead}
           title={isRead ? "Mark as unread" : "Mark as read"}
-          className={`p-1.5 rounded-md transition-colors ${isRead ? "text-primary bg-primary/10" : "text-muted hover:text-white hover:bg-white/5"}`}
+          className={`p-1.5 rounded-lg transition-all ${isRead ? "text-primary bg-primary/15 shadow-[inset_0_0_0_1px_rgb(var(--primary)/0.3)]" : "text-muted hover:text-fg hover:bg-white/8"}`}
         >
           {isRead ? <CircleCheck size={16} /> : <CircleDot size={16} />}
         </button>
         <button
           onClick={handleToggleFavorite}
           title={isFavorited ? "Remove from favorites" : "Add to favorites"}
-          className={`p-1.5 rounded-md transition-colors ${isFavorited ? "text-yellow-400 bg-yellow-400/10" : "text-muted hover:text-white hover:bg-white/5"}`}
+          className={`p-1.5 rounded-lg transition-all ${isFavorited ? "text-yellow-400 bg-yellow-400/15 shadow-[inset_0_0_0_1px_rgb(250_204_21/0.3)]" : "text-muted hover:text-fg hover:bg-white/8"}`}
         >
           <Star size={16} fill={isFavorited ? "currentColor" : "none"} />
         </button>
@@ -242,7 +242,7 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
           onClick={handleReaderView}
           disabled={loadingReader}
           title="Reader view"
-          className={`p-1.5 rounded-md transition-colors ${readerMode ? "text-primary bg-primary/10" : "text-muted hover:text-white hover:bg-white/5"} disabled:opacity-50`}
+          className={`p-1.5 rounded-lg transition-all ${readerMode ? "text-primary bg-primary/15 shadow-[inset_0_0_0_1px_rgb(var(--primary)/0.3)]" : "text-muted hover:text-fg hover:bg-white/8"} disabled:opacity-50`}
         >
           {loadingReader ? <div className="spinner" style={{ width: 16, height: 16 }} /> : <BookOpen size={16} />}
         </button>
@@ -250,7 +250,7 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
           onClick={handleSummarize}
           disabled={summarizing}
           title="AI Summary"
-          className={`p-1.5 rounded-md transition-colors ${summaryHtml ? "text-primary bg-primary/10" : "text-muted hover:text-white hover:bg-white/5"} disabled:opacity-50`}
+          className={`p-1.5 rounded-lg transition-all ${summaryHtml ? "text-primary bg-primary/15 shadow-[inset_0_0_0_1px_rgb(var(--primary)/0.3)]" : "text-muted hover:text-fg hover:bg-white/8"} disabled:opacity-50`}
         >
           {summarizing ? <div className="spinner" style={{ width: 16, height: 16 }} /> : <Sparkles size={16} />}
         </button>
@@ -258,7 +258,7 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
           href={a.link}
           target="_blank"
           rel="noopener noreferrer"
-          className="p-1.5 rounded-md text-muted hover:text-white hover:bg-white/5"
+          className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all"
         >
           <ExternalLink size={16} />
         </a>
@@ -321,7 +321,7 @@ export default function ArticlePanel({ isModal = false }: { isModal?: boolean })
 
         {/* AI Summary */}
         {summaryHtml && (
-          <div className="mb-6 p-4 bg-surface rounded-xl border border-primary/30">
+          <div className="mb-6 p-4 glass-card rounded-xl border border-primary/30 shadow-[0_0_20px_rgb(var(--primary)/0.1)]">
             <div className="flex items-center gap-1.5 mb-3">
               <Sparkles size={14} className="text-primary" />
               <span className="text-xs font-semibold text-primary uppercase tracking-wide">AI Summary</span>

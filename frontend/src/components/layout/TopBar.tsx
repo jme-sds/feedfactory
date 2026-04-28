@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useRef } from "react";
-import { BookOpen, Layers, Settings, MoreVertical, RefreshCw, Plus, Upload, Download, X, Tag } from "lucide-react";
+import { BookOpen, Layers, Settings, MessageSquare, MoreVertical, RefreshCw, Plus, Upload, Download, X, Tag } from "lucide-react";
 import { articles, subscriptions, categories } from "@/lib/api";
 import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { useReaderStore } from "@/lib/store";
@@ -29,6 +29,7 @@ export default function TopBar() {
 
   const nav = [
     { href: "/", label: "Reader", Icon: BookOpen },
+    { href: "/chat", label: "Chat", Icon: MessageSquare },
     { href: "/collections", label: "Digest", Icon: Layers },
     { href: "/settings", label: "Settings", Icon: Settings },
   ];
@@ -90,7 +91,7 @@ export default function TopBar() {
 
   return (
     <>
-      <header className="fixed top-0 left-0 right-0 z-40 h-12 bg-surface border-b border-border flex items-center px-3 gap-3">
+      <header className="fixed top-0 left-0 right-0 z-40 h-12 glass border-b border-white/8 flex items-center px-3 gap-3">
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2 shrink-0">
           <Image src="/logo.png" alt="Feed Factory" width={24} height={24} className="theme-logo" />
@@ -105,10 +106,10 @@ export default function TopBar() {
               <Link
                 key={href}
                 href={href}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-all ${
                   active
-                    ? "bg-primary/20 text-primary"
-                    : "text-muted hover:text-white hover:bg-white/5"
+                    ? "bg-primary/15 text-primary shadow-[inset_0_0_0_1px_rgb(var(--primary)/0.3)]"
+                    : "text-muted hover:text-white hover:bg-white/8"
                 }`}
               >
                 <Icon size={16} />
@@ -132,7 +133,7 @@ export default function TopBar() {
         <button
           onClick={() => setTagBrowseMode(!tagBrowseMode)}
           title={tagBrowseMode ? "Browse by category" : "Browse by tag"}
-          className={`p-1.5 rounded-md transition-colors ${tagBrowseMode ? "text-primary bg-primary/10" : "text-muted hover:text-white hover:bg-white/5"}`}
+          className={`p-1.5 rounded-lg transition-all ${tagBrowseMode ? "text-primary bg-primary/15 shadow-[inset_0_0_0_1px_rgb(var(--primary)/0.3)]" : "text-muted hover:text-white hover:bg-white/8"}`}
         >
           <Tag size={16} />
         </button>
@@ -141,40 +142,40 @@ export default function TopBar() {
         <div className="relative">
           <button
             onClick={() => setMenuOpen(!menuOpen)}
-            className="p-1.5 rounded-md text-muted hover:text-white hover:bg-white/5 transition-colors"
+            className="p-1.5 rounded-lg text-muted hover:text-white hover:bg-white/8 transition-all"
           >
             <MoreVertical size={18} />
           </button>
           {menuOpen && (
-            <div className="absolute right-0 top-8 w-52 bg-surface border border-border rounded-lg shadow-xl py-1 z-50">
+            <div className="absolute right-0 top-8 w-52 glass-heavy rounded-xl shadow-2xl py-1 z-50">
               <button
                 onClick={() => { setAddCategoryOpen(true); setMenuOpen(false); }}
-                className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-white/5"
+                className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-white/8 transition-colors"
               >
                 <Plus size={15} /> Create Category
               </button>
               <button
                 onClick={() => { setAddFeedOpen(true); setMenuOpen(false); }}
-                className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-white/5"
+                className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-white/8 transition-colors"
               >
                 <Plus size={15} /> Add Feed
               </button>
               <button
                 onClick={() => { fileInputRef.current?.click(); setMenuOpen(false); }}
-                className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-white/5"
+                className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-white/8 transition-colors"
               >
                 <Upload size={15} /> Import Feeds (OPML)
               </button>
               <button
                 onClick={() => { subscriptions.exportOpml(); setMenuOpen(false); }}
-                className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-white/5"
+                className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-white/8 transition-colors"
               >
                 <Download size={15} /> Export Feeds (OPML)
               </button>
-              <hr className="border-border my-1" />
+              <hr className="border-white/8 my-1" />
               <button
                 onClick={handleSync}
-                className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-white/5"
+                className="flex items-center gap-2 w-full px-3 py-2 text-sm text-left hover:bg-white/8 transition-colors"
               >
                 <RefreshCw size={15} /> Force Sync All
               </button>
@@ -194,8 +195,8 @@ export default function TopBar() {
 
       {/* Add Feed Modal */}
       {addFeedOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="glass-heavy rounded-2xl p-6 w-full max-w-sm">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold">Add Feed</h2>
               <button onClick={() => setAddFeedOpen(false)}><X size={18} /></button>
@@ -206,13 +207,13 @@ export default function TopBar() {
                 placeholder="https://example.com/feed.xml"
                 value={feedUrl}
                 onChange={(e) => setFeedUrl(e.target.value)}
-                className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors"
                 autoFocus
               />
               <select
                 value={feedCategoryId}
                 onChange={(e) => setFeedCategoryId(e.target.value)}
-                className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors"
               >
                 <option value="">-- No Category --</option>
                 {catsData?.categories.map((c) => (
@@ -220,8 +221,8 @@ export default function TopBar() {
                 ))}
               </select>
               <div className="flex gap-2">
-                <button type="button" onClick={() => { setAddFeedOpen(false); setFeedUrl(""); setFeedCategoryId(""); }} className="flex-1 py-2 rounded-lg border border-border text-sm hover:bg-white/5">Cancel</button>
-                <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover">Add</button>
+                <button type="button" onClick={() => { setAddFeedOpen(false); setFeedUrl(""); setFeedCategoryId(""); }} className="flex-1 py-2 rounded-lg text-sm hover:bg-white/8 transition-colors">Cancel</button>
+                <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover transition-all hover:shadow-[0_0_16px_rgb(var(--primary)/0.35)]">Add</button>
               </div>
             </form>
           </div>
@@ -230,8 +231,8 @@ export default function TopBar() {
 
       {/* Add Category Modal */}
       {addCategoryOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="glass-heavy rounded-2xl p-6 w-full max-w-sm">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold">Create Category</h2>
               <button onClick={() => setAddCategoryOpen(false)}><X size={18} /></button>
@@ -242,12 +243,12 @@ export default function TopBar() {
                 placeholder="Category name"
                 value={categoryName}
                 onChange={(e) => setCategoryName(e.target.value)}
-                className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors"
                 autoFocus
               />
               <div className="flex gap-2">
-                <button type="button" onClick={() => setAddCategoryOpen(false)} className="flex-1 py-2 rounded-lg border border-border text-sm hover:bg-white/5">Cancel</button>
-                <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover">Create</button>
+                <button type="button" onClick={() => setAddCategoryOpen(false)} className="flex-1 py-2 rounded-lg text-sm hover:bg-white/8 transition-colors">Cancel</button>
+                <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover transition-all hover:shadow-[0_0_16px_rgb(var(--primary)/0.35)]">Create</button>
               </div>
             </form>
           </div>

@@ -44,8 +44,8 @@ export default function CollectionCard({ collection: col, allCategories }: Props
   return (
     <>
       <div
-        className={`relative bg-surface border rounded-xl p-4 transition-colors ${
-          col.is_active ? "border-border hover:border-primary/40" : "border-border/40 opacity-60"
+        className={`relative glass-card rounded-2xl p-4 transition-all ${
+          col.is_active ? "hover:shadow-[0_0_20px_rgb(var(--primary)/0.15)]" : "opacity-60"
         }`}
       >
         {/* Enable toggle */}
@@ -61,19 +61,19 @@ export default function CollectionCard({ collection: col, allCategories }: Props
         <div className="absolute top-2 right-2">
           <button
             onClick={() => setMenuOpen(!menuOpen)}
-            className="p-1.5 rounded-md text-muted hover:text-white hover:bg-white/5"
+            className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all"
           >
             <MoreVertical size={16} />
           </button>
           {menuOpen && (
-            <div className="absolute right-0 top-7 w-44 bg-surface border border-border rounded-lg shadow-xl py-1 z-50 text-sm">
-              <button onClick={handleTrigger} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5">
+            <div className="absolute right-0 top-7 w-44 glass-heavy rounded-xl shadow-2xl py-1 z-50 text-sm">
+              <button onClick={handleTrigger} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors">
                 <Play size={13} /> Summarize Now
               </button>
-              <button onClick={() => { setMenuOpen(false); setModalOpen(true); }} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5">
+              <button onClick={() => { setMenuOpen(false); setModalOpen(true); }} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors">
                 <Pencil size={13} /> Edit
               </button>
-              <button onClick={handleDelete} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5 text-danger">
+              <button onClick={handleDelete} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors text-danger">
                 <Trash2 size={13} /> Delete
               </button>
             </div>

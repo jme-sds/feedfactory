@@ -119,31 +119,31 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
     setSaving(false);
   };
 
-  const inputClass = "w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary";
+  const inputClass = "w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors";
   const labelClass = "block text-xs text-muted mb-1";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 p-4 overflow-y-auto">
-      <div className="bg-surface border border-border rounded-xl w-full max-w-lg mt-8 mb-8">
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 backdrop-blur-sm p-4 overflow-y-auto">
+      <div className="glass-heavy rounded-2xl w-full max-w-lg mt-8 mb-8">
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-border">
+        <div className="flex items-center justify-between p-4 border-b border-white/8">
           <div>
             <h2 className="font-semibold">{collection.name}</h2>
             <p className="text-xs text-muted font-mono">{collection.slug}</p>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-md text-muted hover:text-white hover:bg-white/5">
+          <button onClick={onClose} className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all">
             <X size={18} />
           </button>
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-border">
+        <div className="flex border-b border-white/8">
           {(["feeds", "settings", "prompt"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
               className={`flex-1 py-2.5 text-sm capitalize transition-colors ${
-                tab === t ? "text-primary border-b-2 border-primary" : "text-muted hover:text-white"
+                tab === t ? "text-primary border-b-2 border-primary" : "text-muted hover:text-fg"
               }`}
             >
               {t === "prompt" ? "System Prompt" : t.charAt(0).toUpperCase() + t.slice(1)}
@@ -171,13 +171,13 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
               <div className="flex gap-2">
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-muted hover:text-white hover:border-primary/50"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 text-xs text-muted hover:text-fg hover:border-primary/50 transition-all"
                 >
                   <Upload size={13} /> Import OPML
                 </button>
                 <button
                   onClick={() => collections.exportOpml(collection.id)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-muted hover:text-white hover:border-primary/50"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 text-xs text-muted hover:text-fg hover:border-primary/50 transition-all"
                 >
                   <Download size={13} /> Export OPML
                 </button>
@@ -189,7 +189,7 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
                   <p className="text-muted text-sm text-center py-4">No feeds yet</p>
                 )}
                 {feedList.map((feed) => (
-                  <div key={feed.id} className="flex items-center gap-2 py-2 px-2 rounded-lg hover:bg-white/5 group">
+                  <div key={feed.id} className="flex items-center gap-2 py-2 px-2 rounded-lg hover:bg-white/8 transition-colors group">
                     <span className="flex-1 text-sm text-muted truncate font-mono text-xs">{feed.url}</span>
                     <label className="flex items-center gap-1 text-xs text-muted cursor-pointer shrink-0">
                       <input
@@ -292,7 +292,7 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
               <button
                 onClick={handleSaveSettings}
                 disabled={saving}
-                className="w-full py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover disabled:opacity-50 flex items-center justify-center gap-2"
+                className="w-full py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover transition-all hover:shadow-[0_0_16px_rgb(var(--primary)/0.35)] disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {saved ? <><Check size={15} /> Saved</> : saving ? "Saving..." : "Save Settings"}
               </button>
@@ -311,7 +311,7 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
               <button
                 onClick={handleSavePrompt}
                 disabled={saving}
-                className="w-full py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover disabled:opacity-50 flex items-center justify-center gap-2"
+                className="w-full py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover transition-all hover:shadow-[0_0_16px_rgb(var(--primary)/0.35)] disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {saved ? <><Check size={15} /> Saved</> : saving ? "Saving..." : "Save Prompt"}
               </button>

@@ -69,7 +69,7 @@ export default function CollectionsPage() {
   };
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="min-h-screen flex flex-col">
       <TopBar />
 
       <main className="flex-1 mt-12 mb-14 lg:mb-0 p-4 max-w-4xl mx-auto w-full">
@@ -78,13 +78,13 @@ export default function CollectionsPage() {
           <div className="flex gap-2">
             <button
               onClick={handleTriggerAll}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-sm text-muted hover:text-white hover:border-primary/50 transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-muted hover:text-fg hover:bg-white/8 transition-all"
             >
               <Play size={14} /> Run All
             </button>
             <button
               onClick={() => setCreateOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover transition-all hover:shadow-[0_0_16px_rgb(var(--primary)/0.35)]"
             >
               <Plus size={14} /> New Collection
             </button>
@@ -117,11 +117,11 @@ export default function CollectionsPage() {
 
       {/* Create collection modal */}
       {createOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="glass-heavy rounded-2xl p-6 w-full max-w-sm">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold">New Collection</h2>
-              <button onClick={() => setCreateOpen(false)}><X size={18} /></button>
+              <button onClick={() => setCreateOpen(false)} className="p-1 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all"><X size={18} /></button>
             </div>
             <form onSubmit={handleCreate} className="space-y-3">
               <div>
@@ -131,7 +131,7 @@ export default function CollectionsPage() {
                   value={newName}
                   onChange={(e) => handleNameChange(e.target.value)}
                   placeholder="My Daily Digest"
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                  className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors"
                   autoFocus
                   required
                 />
@@ -143,7 +143,7 @@ export default function CollectionsPage() {
                   value={newSlug}
                   onChange={(e) => setNewSlug(e.target.value.replace(/[^a-z0-9-_]/g, ""))}
                   placeholder="my-daily-digest"
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-primary"
+                  className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-primary transition-colors"
                   required
                 />
               </div>
@@ -152,7 +152,7 @@ export default function CollectionsPage() {
                 <select
                   value={newCatId}
                   onChange={(e) => setNewCatId(e.target.value)}
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                  className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors"
                 >
                   <option value="none">-- Uncategorized --</option>
                   {allCategories.map((c) => (
@@ -161,8 +161,8 @@ export default function CollectionsPage() {
                 </select>
               </div>
               <div className="flex gap-2 pt-1">
-                <button type="button" onClick={() => setCreateOpen(false)} className="flex-1 py-2 rounded-lg border border-border text-sm hover:bg-white/5">Cancel</button>
-                <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover">Create</button>
+                <button type="button" onClick={() => setCreateOpen(false)} className="flex-1 py-2 rounded-lg text-sm hover:bg-white/8 transition-colors">Cancel</button>
+                <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover transition-all hover:shadow-[0_0_16px_rgb(var(--primary)/0.35)]">Create</button>
               </div>
             </form>
           </div>

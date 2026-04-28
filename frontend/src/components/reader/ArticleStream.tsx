@@ -209,14 +209,14 @@ export default function ArticleStream() {
   return (
     <div className="flex flex-col h-full">
       {/* Sub-header */}
-      <div className="shrink-0 bg-background border-b border-border px-3 py-2 flex items-center gap-2">
+      <div className="shrink-0 glass sticky top-0 border-b border-white/8 px-3 py-2 flex items-center gap-2 z-10">
         <button
           onClick={() => {
             if (tagBrowseMode && selectedTagFilter) { selectTagFilter(null); }
             else if (tagBrowseMode && selectedEntityFilter) { selectEntityFilter(null); }
             else { goBack(); }
           }}
-          className="p-1.5 rounded-md text-muted hover:text-white hover:bg-white/5"
+          className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all"
         >
           <ArrowLeft size={18} />
         </button>
@@ -229,7 +229,7 @@ export default function ArticleStream() {
             : selectedFeedId === "__all__" ? "All Articles"
             : (currentFeed?.name ?? "Articles")}
         </span>
-        <button onClick={() => setFilterOpen(!filterOpen)} className={`relative p-1.5 rounded-md transition-colors ${filterOpen || filters.topicTags.length > 0 || filters.entityTags.length > 0 || filters.includeKw || filters.excludeKw || filters.since ? "text-primary bg-primary/10" : "text-muted hover:text-white hover:bg-white/5"}`}>
+        <button onClick={() => setFilterOpen(!filterOpen)} className={`relative p-1.5 rounded-lg transition-all ${filterOpen || filters.topicTags.length > 0 || filters.entityTags.length > 0 || filters.includeKw || filters.excludeKw || filters.since ? "text-primary bg-primary/15 shadow-[inset_0_0_0_1px_rgb(var(--primary)/0.3)]" : "text-muted hover:text-fg hover:bg-white/8"}`}>
           <Filter size={16} />
           {(filters.topicTags.length + filters.entityTags.length) > 0 && (
             <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-primary text-white text-[8px] flex items-center justify-center font-bold">
@@ -237,21 +237,21 @@ export default function ArticleStream() {
             </span>
           )}
         </button>
-        <button onClick={() => setSelectModeActive(!selectModeActive)} className={`p-1.5 rounded-md transition-colors ${selectModeActive ? "text-primary bg-primary/10" : "text-muted hover:text-white hover:bg-white/5"}`}>
+        <button onClick={() => setSelectModeActive(!selectModeActive)} className={`p-1.5 rounded-lg transition-all ${selectModeActive ? "text-primary bg-primary/15 shadow-[inset_0_0_0_1px_rgb(var(--primary)/0.3)]" : "text-muted hover:text-fg hover:bg-white/8"}`}>
           <CheckSquare size={16} />
         </button>
         <div className="relative">
           <button
             onClick={() => setStreamMenuOpen(!streamMenuOpen)}
-            className="p-1.5 rounded-md text-muted hover:text-white hover:bg-white/5 transition-colors"
+            className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all"
           >
             <MoreVertical size={16} />
           </button>
           {streamMenuOpen && (
-            <div className="absolute right-0 top-8 w-48 bg-surface border border-border rounded-lg shadow-xl py-1 z-50 text-sm">
+            <div className="absolute right-0 top-8 w-48 glass-heavy rounded-xl shadow-2xl py-1 z-50 text-sm">
               <button
                 onClick={() => { setStreamMenuOpen(false); handleMarkAllRead(); }}
-                className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/5"
+                className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/8 transition-colors"
               >
                 <CheckCheck size={14} /> Mark All Read
               </button>
@@ -259,19 +259,19 @@ export default function ArticleStream() {
                 <>
                   <button
                     onClick={handleToggleAutoScrape}
-                    className={`flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/5 ${currentAutoScrape ? "text-primary" : ""}`}
+                    className={`flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/8 transition-colors ${currentAutoScrape ? "text-primary" : ""}`}
                   >
                     <ScanText size={14} /> {currentAutoScrape ? "Auto-Scrape: On" : "Auto-Scrape: Off"}
                   </button>
                   <button
                     onClick={() => { setStreamMenuOpen(false); setTargetCatId("none"); setChangeCatOpen(true); }}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/5"
+                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/8 transition-colors"
                   >
                     <FolderInput size={14} /> Change Category
                   </button>
                   <button
                     onClick={handleDeleteFeed}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/5 text-danger"
+                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/8 transition-colors text-danger"
                   >
                     <Trash2 size={14} /> Delete Feed
                   </button>
@@ -288,7 +288,7 @@ export default function ArticleStream() {
 
       {/* Filter panel */}
       {filterOpen && (
-        <div className="bg-surface border-b border-border px-3 py-3 space-y-2 text-sm">
+        <div className="glass border-b border-white/8 px-3 py-3 space-y-2 text-sm">
           <div className="flex gap-2">
             {(["unread", "all", "read"] as const).map((s) => (
               <button
@@ -307,14 +307,14 @@ export default function ArticleStream() {
             placeholder="Include keywords (comma-separated)"
             value={filters.includeKw}
             onChange={(e) => setFilters((f) => ({ ...f, includeKw: e.target.value }))}
-            className="w-full bg-background border border-border rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-primary"
+            className="w-full bg-background/60 border border-white/10 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-primary transition-colors"
           />
           <input
             type="text"
             placeholder="Exclude keywords (comma-separated)"
             value={filters.excludeKw}
             onChange={(e) => setFilters((f) => ({ ...f, excludeKw: e.target.value }))}
-            className="w-full bg-background border border-border rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-primary"
+            className="w-full bg-background/60 border border-white/10 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-primary transition-colors"
           />
           <div className="flex items-center gap-2">
             <label className="text-muted text-xs">Published since:</label>
@@ -322,7 +322,7 @@ export default function ArticleStream() {
               type="date"
               value={filters.since}
               onChange={(e) => setFilters((f) => ({ ...f, since: e.target.value }))}
-              className="flex-1 bg-background border border-border rounded px-2.5 py-1 text-xs focus:outline-none focus:border-primary"
+              className="flex-1 bg-background/60 border border-white/10 rounded px-2.5 py-1 text-xs focus:outline-none focus:border-primary transition-colors"
             />
             {(filters.includeKw || filters.excludeKw || filters.since || filters.topicTags.length > 0 || filters.entityTags.length > 0) && (
               <button
@@ -357,16 +357,16 @@ export default function ArticleStream() {
 
       {/* Bulk action bar */}
       {selectModeActive && selectedArticleUrls.size > 0 && (
-        <div className="bg-primary/10 border-b border-primary/30 px-3 py-2 flex items-center gap-2 text-sm">
+        <div className="glass border-b border-white/8 bg-primary/8 px-3 py-2 flex items-center gap-2 text-sm">
           <span className="text-primary font-medium flex-1">{selectedArticleUrls.size} selected</span>
           <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer">
             <input type="checkbox" checked={scrapeOnSummarize} onChange={(e) => setScrapeOnSummarize(e.target.checked)} />
             Scrape
           </label>
-          <button onClick={handleMarkSelectedUnread} title="Mark as unread" className="p-1.5 rounded text-muted hover:text-white">
+          <button onClick={handleMarkSelectedUnread} title="Mark as unread" className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all">
             <CircleDot size={16} />
           </button>
-          <button onClick={handleMarkSelectedRead} title="Mark as read" className="p-1.5 rounded text-muted hover:text-white">
+          <button onClick={handleMarkSelectedRead} title="Mark as read" className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all">
             <CheckCheck size={16} />
           </button>
           <button onClick={handleSummarizeSelected} disabled={summarizing} className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-primary text-white text-xs disabled:opacity-50">
@@ -378,7 +378,7 @@ export default function ArticleStream() {
 
       {/* Summary output */}
       {summaryHtml && (
-        <div className="mx-3 my-2 p-3 bg-surface rounded-xl border border-border text-sm">
+        <div className="mx-3 my-2 p-3 glass-card rounded-xl text-sm">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs text-muted font-medium uppercase tracking-wide">AI Summary</span>
             <button onClick={() => setSummaryHtml(null)} className="text-muted hover:text-white"><X size={14} /></button>
@@ -416,14 +416,14 @@ export default function ArticleStream() {
 
       {/* Change category modal */}
       {changeCatOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="glass-heavy rounded-2xl p-6 w-full max-w-sm">
             <h2 className="font-semibold mb-4">Change Category</h2>
             <form onSubmit={handleChangeCategory} className="space-y-3">
               <select
                 value={targetCatId}
                 onChange={(e) => setTargetCatId(e.target.value)}
-                className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors"
               >
                 <option value="none">-- Uncategorized --</option>
                 {catsData?.categories.map((c) => (
@@ -431,8 +431,8 @@ export default function ArticleStream() {
                 ))}
               </select>
               <div className="flex gap-2">
-                <button type="button" onClick={() => setChangeCatOpen(false)} className="flex-1 py-2 rounded-lg border border-border text-sm hover:bg-white/5">Cancel</button>
-                <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover">Move</button>
+                <button type="button" onClick={() => setChangeCatOpen(false)} className="flex-1 py-2 rounded-lg text-sm hover:bg-white/8 transition-colors">Cancel</button>
+                <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover transition-all hover:shadow-[0_0_16px_rgb(var(--primary)/0.35)]">Move</button>
               </div>
             </form>
           </div>
@@ -486,10 +486,10 @@ function TagFilterDropdown({
       <button
         type="button"
         onClick={() => { setOpen(!open); setSearch(""); }}
-        className={`flex items-center justify-between w-full gap-1 px-2.5 py-1 rounded border text-xs transition-colors ${
+        className={`flex items-center justify-between w-full gap-1 px-2.5 py-1 rounded border text-xs transition-all ${
           selected.length > 0
             ? "border-primary/60 bg-primary/10 text-primary"
-            : "border-border bg-background text-muted hover:border-primary/40 hover:text-white"
+            : "border-white/10 bg-background/60 text-muted hover:border-primary/40 hover:text-fg"
         }`}
       >
         <span className="truncate">
@@ -507,7 +507,7 @@ function TagFilterDropdown({
         <ChevronDown size={11} className="shrink-0 opacity-60" />
       </button>
       {open && (
-        <div className="absolute left-0 top-full mt-1 w-56 bg-surface border border-border rounded-lg shadow-xl z-50 py-1">
+        <div className="absolute left-0 top-full mt-1 w-56 glass-heavy rounded-xl shadow-2xl z-50 py-1">
           <div className="px-2 pt-1 pb-1">
             <input
               autoFocus
@@ -516,7 +516,7 @@ function TagFilterDropdown({
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={(e) => e.key === "Escape" && setOpen(false)}
-              className="w-full bg-background border border-border rounded px-2 py-1 text-xs focus:outline-none focus:border-primary"
+              className="w-full bg-background/60 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-primary transition-colors"
             />
           </div>
           <div className="max-h-48 overflow-y-auto">
@@ -524,7 +524,7 @@ function TagFilterDropdown({
               <p className="text-xs text-muted text-center py-3">No matches</p>
             ) : (
               filtered.map((opt) => (
-                <label key={opt} className="flex items-center gap-2 px-3 py-1.5 hover:bg-white/5 cursor-pointer text-xs">
+                <label key={opt} className="flex items-center gap-2 px-3 py-1.5 hover:bg-white/8 cursor-pointer text-xs transition-colors">
                   <input
                     type="checkbox"
                     checked={selected.includes(opt)}
@@ -574,7 +574,7 @@ function ArticleRow({
   const overflowCount = allPills.length - visiblePills.length;
   return (
     <div
-      className={`flex items-start gap-2 px-3 py-3 border-b border-border cursor-pointer hover:bg-white/5 transition-colors ${
+      className={`flex items-start gap-2 px-3 py-3 border-b border-white/6 cursor-pointer hover:bg-white/8 transition-colors ${
         article.is_read ? "opacity-40" : ""
       } ${selected ? "bg-primary/10" : ""}`}
       onClick={onClick}
@@ -583,7 +583,7 @@ function ArticleRow({
         <div className="pt-0.5 shrink-0">
           <div
             className={`w-4 h-4 rounded border transition-colors ${
-              selected ? "bg-primary border-primary" : "border-border"
+              selected ? "bg-primary border-primary" : "border-white/20"
             }`}
           />
         </div>

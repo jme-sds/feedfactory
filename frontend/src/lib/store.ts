@@ -17,6 +17,7 @@ interface ReaderState {
   goBack: () => void;
   goBackToCategories: () => void;
   setMobileView: (view: MobileView) => void;
+  resetNavigation: () => void;
 
   // UI state
   filterPanelOpen: boolean;
@@ -84,6 +85,14 @@ export const useReaderStore = create<ReaderState>((set, get) => ({
   // Desktop-only: go straight to categories without clearing article/feed
   goBackToCategories: () => set({ mobileView: "categories" }),
 
+  // Full reset to top-level categories view (used when leaving chat article panel)
+  resetNavigation: () => set({
+    selectedCategoryId: "all",
+    selectedFeedId: null,
+    selectedArticle: null,
+    mobileView: "categories",
+  }),
+
   setMobileView: (view) => set({ mobileView: view }),
 
   filterPanelOpen: false,
@@ -130,6 +139,51 @@ export const useReaderStore = create<ReaderState>((set, get) => ({
     selectedArticle: null,
     mobileView: entity ? "stream" : "categories",
   }),
+}));
+
+// --- Chat Store ---
+
+type ChatMobileView = "conversations" | "chat" | "article";
+
+interface ChatState {
+  activeConversationId: number | null;
+  chatMobileView: ChatMobileView;
+  chatViewingArticle: Article | null;
+
+  setActiveConversationId: (id: number | null) => void;
+  setChatMobileView: (view: ChatMobileView) => void;
+  openArticleFromChat: (article: Article) => void;
+  closeArticleFromChat: () => void;
+  goBackInChat: () => void;
+}
+
+export const useChatStore = create<ChatState>((set, get) => ({
+  activeConversationId: null,
+  chatMobileView: "conversations",
+  chatViewingArticle: null,
+
+  setActiveConversationId: (id) =>
+    set({
+      activeConversationId: id,
+      chatMobileView: id !== null ? "chat" : "conversations",
+    }),
+
+  setChatMobileView: (view) => set({ chatMobileView: view }),
+
+  openArticleFromChat: (article) =>
+    set({ chatViewingArticle: article, chatMobileView: "article" }),
+
+  closeArticleFromChat: () =>
+    set({ chatViewingArticle: null, chatMobileView: "chat" }),
+
+  goBackInChat: () => {
+    const { chatMobileView } = get();
+    if (chatMobileView === "article") {
+      set({ chatViewingArticle: null, chatMobileView: "chat" });
+    } else if (chatMobileView === "chat") {
+      set({ activeConversationId: null, chatMobileView: "conversations" });
+    }
+  },
 }));
 
 function getCsrfToken(): string {

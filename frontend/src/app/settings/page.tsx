@@ -4,8 +4,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { settings, topicTags as topicTagsApi, type Settings, type TopicTag } from "@/lib/api";
 import TopBar from "@/components/layout/TopBar";
 import BottomNav from "@/components/layout/BottomNav";
-import { ChevronDown, ChevronRight, Check, Zap, Upload, Plus, Trash2, RefreshCw, Tag } from "lucide-react";
-import { useState, useRef, useEffect } from "react";
+import { ChevronDown, ChevronRight, Check, Zap, Upload, Plus, Trash2, RefreshCw, Tag, Database } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/api";
 
@@ -92,7 +92,7 @@ function TopicTagsSection({ openSection, setOpenSection }: { openSection: string
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="e.g. Climate Change"
-            className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+            className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors"
           />
         </div>
         <div className="w-24">
@@ -102,7 +102,7 @@ function TopicTagsSection({ openSection, setOpenSection }: { openSection: string
             value={newThreshold}
             onChange={(e) => setNewThreshold(e.target.value)}
             step="0.01" min="0.05" max="0.99"
-            className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+            className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors"
           />
         </div>
         <button type="submit" className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover shrink-0">
@@ -113,7 +113,7 @@ function TopicTagsSection({ openSection, setOpenSection }: { openSection: string
       <button
         onClick={handleRetag}
         disabled={retagging}
-        className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border text-sm hover:bg-white/5 transition-colors disabled:opacity-50"
+        className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm hover:bg-white/8 transition-all disabled:opacity-50"
       >
         <RefreshCw size={14} className={retagging ? "animate-spin" : ""} />
         {retagging ? "Starting..." : "Re-tag All Existing Articles"}
@@ -140,7 +140,7 @@ function TopicTagRow({
   }, [tag.threshold]);
 
   return (
-    <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-surface/40">
+    <div className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card">
       <button
         type="button"
         onClick={onToggle}
@@ -170,7 +170,7 @@ function TopicTagRow({
           onChange={(e) => setLocalThreshold(e.target.value)}
           onBlur={(e) => onThresholdBlur(e.target.value)}
           step="0.01" min="0.05" max="0.99"
-          className="w-16 bg-background border border-border rounded px-2 py-1 text-xs focus:outline-none focus:border-primary"
+          className="w-16 bg-background/60 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-primary transition-colors"
         />
       </div>
       <button onClick={onDelete} className="p-1 text-muted hover:text-danger transition-colors shrink-0">
@@ -194,16 +194,16 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <div className="border border-border rounded-xl overflow-hidden">
+    <div className="glass-card rounded-xl overflow-hidden">
       <button
         onClick={() => setOpenSection(openSection === id ? "" : id)}
-        className="w-full flex items-center justify-between px-4 py-3.5 bg-surface hover:bg-white/5 transition-colors text-left"
+        className="w-full flex items-center justify-between px-4 py-3.5 hover:bg-white/8 transition-all text-left"
       >
         <span className="font-medium text-sm">{title}</span>
         {openSection === id ? <ChevronDown size={16} className="text-muted" /> : <ChevronRight size={16} className="text-muted" />}
       </button>
       {openSection === id && (
-        <div className="px-4 py-4 space-y-4 border-t border-border bg-background/50">
+        <div className="px-4 py-4 space-y-4 border-t border-white/8 bg-background/20">
           {children}
         </div>
       )}
@@ -217,12 +217,16 @@ export default function SettingsPage() {
   const [openSection, setOpenSection] = useState<string>("ai");
   type CustomColors = { background: string; surface: string; border: string; primary: string; muted: string; fg: string };
   const DEFAULT_CUSTOM_COLORS: CustomColors = { background: "#141414", surface: "#1e1e1e", border: "#333333", primary: "#1095c1", muted: "#888888", fg: "#ffffff" };
-  const [form, setForm] = useState<Partial<Settings> & { api_key?: string; ui_theme?: string; ui_accent?: string; ui_custom_colors?: string }>({});
+  const [form, setForm] = useState<Partial<Settings> & { api_key?: string; embed_api_key?: string; ui_theme?: string; ui_accent?: string; ui_custom_colors?: string }>({});
   const [customColors, setCustomColors] = useState<CustomColors>(DEFAULT_CUSTOM_COLORS);
   const [typographyTab, setTypographyTab] = useState<"desktop" | "mobile">("desktop");
   const [saved, setSaved] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [testingEmbed, setTestingEmbed] = useState(false);
+  const [embedTestResult, setEmbedTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [reembedding, setReembedding] = useState(false);
+  const [reembedProgress, setReembedProgress] = useState<{ processed: number; total: number } | null>(null);
   const restoreInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -259,10 +263,15 @@ export default function SettingsPage() {
         ui_theme: currentSettings.ui_theme || "default",
         ui_accent: currentSettings.ui_accent || "",
         ui_custom_colors: currentSettings.ui_custom_colors || "",
+        ui_glass_mode: currentSettings.ui_glass_mode !== false,
         default_hdbscan_min_cluster_size: currentSettings.default_hdbscan_min_cluster_size ?? 3,
         default_hdbscan_min_samples: currentSettings.default_hdbscan_min_samples ?? 0,
         default_hdbscan_cluster_selection_epsilon: currentSettings.default_hdbscan_cluster_selection_epsilon ?? 0,
         default_hdbscan_cluster_selection_method: currentSettings.default_hdbscan_cluster_selection_method || "eom",
+        embed_source: currentSettings.embed_source ?? "local",
+        embed_api_endpoint: currentSettings.embed_api_endpoint ?? "",
+        embed_model_name: currentSettings.embed_model_name ?? "",
+        embed_same_as_generative: currentSettings.embed_same_as_generative ?? false,
       });
       if (currentSettings.ui_custom_colors) {
         try {
@@ -298,6 +307,67 @@ export default function SettingsPage() {
       setTestResult({ ok: false, message: e.message });
     }
     setTesting(false);
+  };
+
+  const { data: embedStats } = useQuery({
+    queryKey: ["embedding-stats"],
+    queryFn: settings.embeddingStats,
+  });
+
+  const handleTestEmbed = async () => {
+    setTestingEmbed(true);
+    setEmbedTestResult(null);
+    try {
+      const result = await settings.testEmbedding({
+        embed_source: form.embed_source ?? "local",
+        embed_api_endpoint: form.embed_api_endpoint,
+        embed_api_key: form.embed_api_key,
+        embed_model_name: form.embed_model_name,
+        embed_same_as_generative: form.embed_same_as_generative,
+      });
+      setEmbedTestResult(result);
+    } catch (e: any) {
+      setEmbedTestResult({ ok: false, message: e.message });
+    }
+    setTestingEmbed(false);
+  };
+
+  const pollReembedStatus = useCallback(async () => {
+    const status = await settings.reembedStatus();
+    setReembedProgress({ processed: status.processed, total: status.total });
+    if (status.running) {
+      setTimeout(pollReembedStatus, 1500);
+    } else {
+      setReembedding(false);
+      if (status.error) {
+        alert(`Re-embedding failed: ${status.error}`);
+      } else {
+        qc.invalidateQueries({ queryKey: ["embedding-stats"] });
+      }
+    }
+  }, [qc]);
+
+  const handleReembed = async () => {
+    if (!confirm(`This will re-embed all ${embedStats?.total_articles ?? "?"} articles using the current embedding settings. This may incur API costs. Continue?`)) return;
+    try {
+      // Save embedding settings to DB first so the background task always uses
+      // the current UI state, not whatever was last explicitly saved.
+      await settings.update({
+        embed_source: form.embed_source,
+        embed_api_endpoint: form.embed_api_endpoint,
+        embed_api_key: form.embed_api_key,
+        embed_model_name: form.embed_model_name,
+        embed_same_as_generative: form.embed_same_as_generative,
+      });
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      setReembedding(true);
+      setReembedProgress({ processed: 0, total: embedStats?.total_articles ?? 0 });
+      await settings.reembed();
+      setTimeout(pollReembedStatus, 500);
+    } catch (e: any) {
+      setReembedding(false);
+      alert(e.message);
+    }
   };
 
   const handleRestore = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -382,14 +452,14 @@ export default function SettingsPage() {
     { hex: "#14b8a6", label: "Teal" },
   ] as const;
 
-  const inputClass = "w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors";
+  const inputClass = "w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors";
   const labelClass = "block text-xs text-muted mb-1.5";
   const demoMode = currentSettings?.demo_mode;
 
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-background flex flex-col">
+      <div className="min-h-screen flex flex-col">
         <TopBar />
         <div className="flex items-center justify-center flex-1">
           <div className="spinner" />
@@ -422,6 +492,9 @@ export default function SettingsPage() {
                 AI provider settings are locked in demo mode.
               </p>
             )}
+
+            {/* Generative model */}
+            <p className="text-xs font-semibold text-muted uppercase tracking-wide">Generative Model</p>
             <div>
               <label className={labelClass}>Base URL</label>
               <input type="url" value={form.api_endpoint || ""} onChange={set("api_endpoint")} disabled={demoMode} className={inputClass} placeholder="https://api.openai.com/v1/chat/completions" />
@@ -436,7 +509,7 @@ export default function SettingsPage() {
             </div>
             {!demoMode && (
               <div className="flex items-center gap-3">
-                <button onClick={handleTestLlm} disabled={testing} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-sm hover:bg-white/5 disabled:opacity-50">
+                <button onClick={handleTestLlm} disabled={testing} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm hover:bg-white/8 transition-all disabled:opacity-50">
                   <Zap size={14} /> {testing ? "Testing..." : "Test Connection"}
                 </button>
                 {testResult && (
@@ -446,6 +519,141 @@ export default function SettingsPage() {
                 )}
               </div>
             )}
+
+            {/* Divider */}
+            <div className="border-t border-white/8" />
+
+            {/* Embedding model */}
+            <p className="text-xs font-semibold text-muted uppercase tracking-wide">Embedding Model</p>
+
+            {/* Local toggle */}
+            <label className="flex items-center gap-3 cursor-pointer">
+              <div
+                className={`relative w-10 h-5 rounded-full transition-colors ${(form.embed_source ?? "local") === "local" ? "bg-primary" : "bg-border"}`}
+                onClick={() => {
+                  if (demoMode) return;
+                  setForm((f) => {
+                    const next = (f.embed_source ?? "local") === "local" ? "api" : "local";
+                    return {
+                      ...f,
+                      embed_source: next,
+                      ...(next === "local" ? { embed_same_as_generative: false } : {}),
+                    };
+                  });
+                }}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${(form.embed_source ?? "local") === "local" ? "" : "translate-x-5"}`} />
+              </div>
+              <span className="text-sm">Use local model (all-MiniLM-L6-v2, no cost, 384-dim)</span>
+            </label>
+
+            {(form.embed_source ?? "local") === "api" && (
+              <div className="space-y-3">
+                {/* Same-as-generative toggle */}
+                {!demoMode && (
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <div
+                      className={`relative w-10 h-5 rounded-full transition-colors ${form.embed_same_as_generative ? "bg-primary" : "bg-border"}`}
+                      onClick={() => setForm((f) => {
+                        const checked = !f.embed_same_as_generative;
+                        return {
+                          ...f,
+                          embed_same_as_generative: checked,
+                          ...(checked ? { embed_api_endpoint: f.api_endpoint ?? "" } : {}),
+                        };
+                      })}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${form.embed_same_as_generative ? "translate-x-5" : ""}`} />
+                    </div>
+                    <span className="text-sm">Same as generative model</span>
+                  </label>
+                )}
+                <div>
+                  <label className={labelClass}>Embedding Base URL</label>
+                  <input
+                    type="url"
+                    value={form.embed_api_endpoint || ""}
+                    onChange={set("embed_api_endpoint")}
+                    disabled={demoMode || !!form.embed_same_as_generative}
+                    className={inputClass}
+                    placeholder="https://api.openai.com/v1"
+                  />
+                  <p className="text-xs text-muted mt-1">The <code className="text-xs">/embeddings</code> path is appended automatically.</p>
+                </div>
+                <div>
+                  <label className={labelClass}>
+                    Embedding API Key{" "}
+                    {form.embed_same_as_generative
+                      ? <span className="text-muted">(mirrors generative model key)</span>
+                      : currentSettings?.embed_api_key_is_set && <span className="text-success">(set)</span>}
+                  </label>
+                  <input
+                    type="password"
+                    value={form.embed_api_key || ""}
+                    onChange={set("embed_api_key")}
+                    disabled={demoMode || !!form.embed_same_as_generative}
+                    className={inputClass}
+                    placeholder={form.embed_same_as_generative ? "Using generative model key" : "sk-..."}
+                  />
+                </div>
+                <div>
+                  <label className={labelClass}>Embedding Model Name</label>
+                  <input type="text" value={form.embed_model_name || ""} onChange={set("embed_model_name")} disabled={demoMode} className={inputClass} placeholder="text-embedding-3-small" />
+                </div>
+              </div>
+            )}
+
+            {!demoMode && (
+              <div className="flex items-center gap-3">
+                <button onClick={handleTestEmbed} disabled={testingEmbed} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm hover:bg-white/8 transition-all disabled:opacity-50">
+                  <Zap size={14} /> {testingEmbed ? "Testing..." : "Test Embedding"}
+                </button>
+                {embedTestResult && (
+                  <span className={`text-sm ${embedTestResult.ok ? "text-success" : "text-danger"}`}>
+                    {embedTestResult.ok ? "✅" : "❌"} {embedTestResult.message}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Token count info + re-embed */}
+            <div className="rounded-lg glass-card px-3 py-3 space-y-2">
+              <div className="flex items-center gap-2 text-xs text-muted">
+                <Database size={13} />
+                <span>
+                  {embedStats
+                    ? <>
+                        <span className="text-fg font-medium">{embedStats.embedded_count.toLocaleString()}</span> / {embedStats.total_articles.toLocaleString()} articles embedded
+                        &nbsp;·&nbsp;
+                        ~<span className="text-fg font-medium">{embedStats.estimated_tokens.toLocaleString()}</span> tokens to re-embed all
+                      </>
+                    : "Loading stats…"}
+                </span>
+              </div>
+              <p className="text-xs text-muted">
+                Changing the embedding model requires re-embedding all articles so similarity search remains consistent.
+                Save your new settings first, then re-embed.
+              </p>
+              {reembedding && reembedProgress && (
+                <div className="space-y-1">
+                  <div className="h-1.5 rounded-full bg-border overflow-hidden">
+                    <div
+                      className="h-full bg-primary transition-all duration-500"
+                      style={{ width: reembedProgress.total ? `${(reembedProgress.processed / reembedProgress.total) * 100}%` : "0%" }}
+                    />
+                  </div>
+                  <p className="text-xs text-muted">{reembedProgress.processed} / {reembedProgress.total} articles</p>
+                </div>
+              )}
+              <button
+                onClick={handleReembed}
+                disabled={reembedding || demoMode}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm hover:bg-white/8 transition-all disabled:opacity-50"
+              >
+                <RefreshCw size={13} className={reembedding ? "animate-spin" : ""} />
+                {reembedding ? "Re-embedding…" : "Re-embed All Articles"}
+              </button>
+            </div>
           </Section>
 
           {/* Auto-Cleanup */}
@@ -523,7 +731,7 @@ export default function SettingsPage() {
           {/* Typography */}
           <Section id="typography" title="Reader Typography" openSection={openSection} setOpenSection={setOpenSection}>
             {/* Desktop / Mobile tab switcher */}
-            <div className="flex gap-1 p-1 bg-surface rounded-lg w-fit">
+            <div className="flex gap-1 p-1 glass-card rounded-lg w-fit">
               {(["desktop", "mobile"] as const).map((tab) => (
                 <button
                   key={tab}
@@ -532,7 +740,7 @@ export default function SettingsPage() {
                   className={`px-3 py-1 rounded-md text-xs font-medium transition-colors capitalize ${
                     typographyTab === tab
                       ? "bg-primary text-white"
-                      : "text-muted hover:text-white"
+                      : "text-muted hover:text-fg"
                   }`}
                 >
                   {tab}
@@ -558,7 +766,7 @@ export default function SettingsPage() {
                   </div>
                 </div>
                 <div
-                  className="p-3 bg-background border border-border rounded-lg text-sm"
+                  className="p-3 bg-background/60 border border-white/10 rounded-lg text-sm"
                   style={{
                     fontFamily: form.reader_font_family || "system-ui, -apple-system, sans-serif",
                     fontSize: form.reader_font_size || "1.15rem",
@@ -586,7 +794,7 @@ export default function SettingsPage() {
                   </div>
                 </div>
                 <div
-                  className="p-3 bg-background border border-border rounded-lg text-sm"
+                  className="p-3 bg-background/60 border border-white/10 rounded-lg text-sm"
                   style={{
                     fontFamily: form.reader_font_family_mobile || form.reader_font_family || "system-ui, -apple-system, sans-serif",
                     fontSize: form.reader_font_size_mobile || form.reader_font_size || "1.15rem",
@@ -694,7 +902,7 @@ export default function SettingsPage() {
 
               {/* Custom theme color editor */}
               {(form.ui_theme || "default") === "custom" && (
-                <div className="mt-3 p-3 rounded-xl border border-border bg-surface/50 space-y-3">
+                <div className="mt-3 p-3 rounded-xl glass-card space-y-3">
                   <p className="text-xs text-muted">Customize each color. Changes apply immediately.</p>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                     {(
@@ -711,7 +919,7 @@ export default function SettingsPage() {
                         <label
                           title={label}
                           style={{ position: "relative", flexShrink: 0, cursor: "pointer" }}
-                          className="w-8 h-8 rounded-lg border border-border overflow-hidden"
+                          className="w-8 h-8 rounded-lg border border-white/10 overflow-hidden"
                         >
                           <div style={{ width: "100%", height: "100%", background: customColors[key] }} />
                           <input
@@ -778,7 +986,7 @@ export default function SettingsPage() {
                 <label
                   title="Custom color"
                   style={{ width: 26, height: 26, flexShrink: 0, position: "relative", cursor: "pointer" }}
-                  className="rounded-full border border-border flex items-center justify-center hover:border-primary transition-colors"
+                  className="rounded-full border border-white/10 flex items-center justify-center hover:border-primary transition-all"
                 >
                   <span className="text-muted text-xs leading-none select-none">+</span>
                   <input
@@ -789,6 +997,27 @@ export default function SettingsPage() {
                   />
                 </label>
               </div>
+            </div>
+
+            {/* Liquid Glass toggle */}
+            <div className="border-t border-white/8 pt-4">
+              <p className={labelClass}>Liquid Glass <span className="text-xs font-normal text-muted ml-1">(Experimental)</span></p>
+              <p className="text-xs text-muted mb-3">Enables translucent, blurred surfaces. Disable for a cleaner look or on devices with performance issues.</p>
+              <label className="flex items-center gap-3 cursor-pointer">
+                <div
+                  className={`relative w-10 h-5 rounded-full transition-colors ${form.ui_glass_mode !== false ? "bg-primary" : "bg-border"}`}
+                  onClick={() => {
+                    const newVal = form.ui_glass_mode === false;
+                    setForm((f) => ({ ...f, ui_glass_mode: newVal }));
+                    document.documentElement.setAttribute("data-glass", newVal ? "on" : "off");
+                    try { localStorage.setItem("ff_glass_mode", newVal ? "on" : "off"); } catch {}
+                    settings.update({ ui_glass_mode: newVal }).catch(() => {});
+                  }}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${form.ui_glass_mode !== false ? "translate-x-5" : ""}`} />
+                </div>
+                <span className="text-sm">{form.ui_glass_mode !== false ? "Enabled" : "Disabled"}</span>
+              </label>
             </div>
           </Section>
 
@@ -807,7 +1036,7 @@ export default function SettingsPage() {
           {!demoMode && (
             <Section id="backup" title="Data Backup & Restore" openSection={openSection} setOpenSection={setOpenSection}>
               <div className="flex flex-wrap gap-3">
-                <button onClick={settings.backup} className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border text-sm hover:bg-white/5 transition-colors">
+                <button onClick={settings.backup} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm hover:bg-white/8 transition-all">
                   Download Backup
                 </button>
                 <button onClick={() => restoreInputRef.current?.click()} className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-danger/50 text-danger text-sm hover:bg-danger/5 transition-colors">

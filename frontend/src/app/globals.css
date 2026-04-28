@@ -68,6 +68,29 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Ambient gradient orbs — gives backdrop-filter something to blur */
+body {
+  background-image:
+    radial-gradient(ellipse 70% 50% at 10% 0%, rgb(var(--primary) / 0.18), transparent 65%),
+    radial-gradient(ellipse 60% 50% at 90% 100%, rgb(var(--primary) / 0.12), transparent 65%);
+}
+
+[data-theme="light"] body,
+[data-theme="sepia"] body {
+  background-image:
+    radial-gradient(ellipse 70% 50% at 10% 0%, rgb(var(--primary) / 0.07), transparent 65%),
+    radial-gradient(ellipse 60% 50% at 90% 100%, rgb(var(--primary) / 0.05), transparent 65%);
+}
+
+/* Prevent iOS Safari from auto-zooming on input focus (triggered when font-size < 16px).
+   !important is required because Tailwind utility classes (text-sm = 14px) are generated
+   later in the cascade and would otherwise override this rule. */
+input,
+textarea,
+select {
+  font-size: max(16px, 1em) !important;
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
@@ -180,4 +203,182 @@ body {
 .article-selected {
   outline: 2px solid rgb(var(--primary));
   border-radius: 8px;
+}
+
+/* ============================================================
+   CHAT MARKDOWN CONTENT
+   ============================================================ */
+
+.chat-content p {
+  margin-bottom: 0.6em;
+}
+.chat-content p:last-child {
+  margin-bottom: 0;
+}
+.chat-content code {
+  background: rgb(var(--background));
+  border: 1px solid rgb(var(--border));
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  font-size: 0.85em;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+.chat-content pre {
+  background: rgb(var(--background));
+  border: 1px solid rgb(var(--border));
+  border-radius: 8px;
+  padding: 0.75em 1em;
+  overflow-x: auto;
+  margin-bottom: 0.75em;
+}
+.chat-content pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+.chat-content ul,
+.chat-content ol {
+  padding-left: 1.35em;
+  margin-bottom: 0.6em;
+}
+.chat-content li {
+  margin-bottom: 0.2em;
+}
+.chat-content strong {
+  color: rgb(var(--fg));
+  font-weight: 600;
+}
+.chat-content a {
+  color: rgb(var(--primary));
+  text-decoration: none;
+}
+.chat-content a:hover {
+  text-decoration: underline;
+}
+.chat-content h1,
+.chat-content h2,
+.chat-content h3 {
+  font-weight: 600;
+  margin-bottom: 0.4em;
+  color: rgb(var(--fg));
+}
+.chat-content blockquote {
+  border-left: 3px solid rgb(var(--primary));
+  padding-left: 0.75em;
+  margin: 0.5em 0;
+  color: rgb(var(--muted));
+}
+
+/* Three-dot typing indicator animation */
+@keyframes chat-dot-bounce {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+  40%           { opacity: 1;    transform: scale(1); }
+}
+.chat-typing-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgb(var(--muted));
+  animation: chat-dot-bounce 1.2s ease-in-out infinite;
+}
+.chat-typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.chat-typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* ============================================================
+   LIQUID GLASS UTILITY CLASSES
+   Three levels of glass for floating vs modal vs card contexts.
+   backdrop-filter is GPU-accelerated; reserved for elements that
+   visibly float over scrolling content (navbars, modals, menus).
+   ============================================================ */
+
+/* glass — fixed/sticky floaters: TopBar, BottomNav, dropdowns */
+.glass {
+  background: rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(14px) saturate(180%);
+  -webkit-backdrop-filter: blur(14px) saturate(180%);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+/* glass-heavy — modals and high-priority overlays */
+.glass-heavy {
+  background: rgba(18, 18, 18, 0.88);
+  backdrop-filter: blur(24px) saturate(200%);
+  -webkit-backdrop-filter: blur(24px) saturate(200%);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.56), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* glass-card — content tiles; no backdrop-filter to keep GPU cost low */
+.glass-card {
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.09);
+}
+
+/* Light / sepia overrides — high-opacity white for legibility on light backgrounds */
+[data-theme="light"] .glass,
+[data-theme="sepia"] .glass {
+  background: rgba(255, 255, 255, 0.68);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+[data-theme="light"] .glass-heavy,
+[data-theme="sepia"] .glass-heavy {
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+[data-theme="light"] .glass-card,
+[data-theme="sepia"] .glass-card {
+  background: rgba(255, 255, 255, 0.6);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+/* hover:bg-white/8 override for light/sepia (same pattern as existing white/5 override) */
+[data-theme="light"] .hover\:bg-white\/8:hover,
+[data-theme="sepia"] .hover\:bg-white\/8:hover {
+  background-color: rgb(0 0 0 / 0.07);
+}
+
+/* ── Glass enabled — soften white separator borders ─────────────── */
+/* border-white/8 and border-white/6 appear as harsh white stripes on dark
+   backgrounds. In glass mode the blur/surface contrast already creates visual
+   separation, so these lines only need to be a faint glint. */
+[data-glass="on"] .border-white\/6 {
+  border-color: rgba(255, 255, 255, 0.03);
+}
+[data-glass="on"] .border-white\/8 {
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+/* ── Glass disabled — clean flat UI (data-glass="off") ──────────── */
+[data-glass="off"] body {
+  background-image: none;
+}
+[data-glass="off"] .glass {
+  background: rgb(var(--surface));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  /* Strengthen border-white/8 separators — they're near-invisible without the blur effect */
+  border-color: rgb(var(--border) / 0.8);
+}
+[data-glass="off"] .glass-heavy {
+  background: rgb(var(--surface));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  border: 1px solid rgb(var(--border) / 0.8);
+}
+/* glass-card: use box-shadow ring for card outline so component-level border-* and
+   shadow-* classes (active/selected state) still take effect via normal cascade.
+   The ring makes inactive tiles visible against the background without clobbering
+   the primary-colored border/glow on selected tiles. */
+[data-glass="off"] .glass-card {
+  background: rgb(var(--surface));
+  box-shadow: 0 0 0 1px rgb(var(--border) / 0.5);
+}
+/* Strengthen near-invisible white-opacity borders used for panel separators */
+[data-glass="off"] .border-white\/6 {
+  border-color: rgb(var(--border) / 0.6);
+}
+[data-glass="off"] .border-white\/8 {
+  border-color: rgb(var(--border) / 0.7);
 }

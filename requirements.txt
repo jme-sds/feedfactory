@@ -3,6 +3,7 @@ starlette<1.0.0
 uvicorn[standard]
 sqlmodel
 requests
+openai
 beautifulsoup4
 feedparser
 python-multipart

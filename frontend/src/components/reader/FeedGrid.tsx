@@ -123,23 +123,23 @@ export default function FeedGrid({ onBack }: { onBack?: () => void }) {
   return (
     <div className="flex flex-col h-full">
       {/* Sub-header with category context menu */}
-      <div className="shrink-0 bg-background border-b border-border px-3 py-2 flex items-center gap-2">
-        <button onClick={handleBack} className="p-1.5 rounded-md text-muted hover:text-white hover:bg-white/5">
+      <div className="shrink-0 glass sticky top-0 border-b border-white/8 px-3 py-2 flex items-center gap-2 z-10">
+        <button onClick={handleBack} className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all">
           <ArrowLeft size={18} />
         </button>
         <span className="font-semibold text-sm flex-1 truncate">{category_name}</span>
         <div className="relative">
           <button
             onClick={() => setCatMenuOpen(!catMenuOpen)}
-            className="p-1.5 rounded-md text-muted hover:text-white hover:bg-white/5 transition-colors"
+            className="p-1.5 rounded-lg text-muted hover:text-fg hover:bg-white/8 transition-all"
           >
             <MoreVertical size={18} />
           </button>
           {catMenuOpen && (
-            <div className="absolute right-0 top-8 w-48 bg-surface border border-border rounded-lg shadow-xl py-1 z-50 text-sm">
+            <div className="absolute right-0 top-8 w-48 glass-heavy rounded-xl shadow-2xl py-1 z-50 text-sm">
               <button
                 onClick={handleCatMarkRead}
-                className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/5"
+                className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/8 transition-colors"
               >
                 <CheckCheck size={14} /> Mark All Read
               </button>
@@ -147,19 +147,19 @@ export default function FeedGrid({ onBack }: { onBack?: () => void }) {
                 <>
                   <button
                     onClick={handleCatRename}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/5"
+                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/8 transition-colors"
                   >
                     <Pencil size={14} /> Rename Category
                   </button>
                   <button
                     onClick={handleCreateCollection}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/5"
+                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/8 transition-colors"
                   >
                     <Layers size={14} /> Create Collection
                   </button>
                   <button
                     onClick={handleCatDelete}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/5 text-danger"
+                    className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-white/8 transition-colors text-danger"
                   >
                     <Trash2 size={14} /> Delete Category
                   </button>
@@ -175,10 +175,10 @@ export default function FeedGrid({ onBack }: { onBack?: () => void }) {
         {/* All articles in category */}
         <button
           onClick={() => selectFeed("__all__")}
-          className={`flex flex-col items-start p-3 rounded-xl border transition-all text-left ${
+          className={`flex flex-col items-start p-3 rounded-xl border transition-all text-left glass-card ${
             selectedFeedId === "__all__"
-              ? "border-primary bg-primary/10"
-              : "border-primary/30 bg-primary/5 hover:border-primary/60"
+              ? "border-primary/60 bg-primary/10 shadow-[0_0_12px_rgb(var(--primary)/0.2)]"
+              : "border-transparent bg-primary/5 hover:bg-primary/10"
           }`}
         >
           <span className="font-medium text-sm">All Articles Here</span>
@@ -191,12 +191,12 @@ export default function FeedGrid({ onBack }: { onBack?: () => void }) {
           <div key={feed.id} className="relative">
             <button
               onClick={() => selectFeed(feed.id)}
-              className={`w-full flex flex-col items-start p-3 rounded-xl border transition-all text-left ${
+              className={`w-full flex flex-col items-start p-3 rounded-xl border transition-all text-left glass-card ${
                 selectedFeedId === feed.id
-                  ? "border-primary bg-primary/10"
+                  ? "border-primary/60 bg-primary/10 shadow-[0_0_12px_rgb(var(--primary)/0.2)]"
                   : feed.type === "collection"
-                  ? "border-primary/20 bg-primary/5 hover:border-primary/40"
-                  : "border-border bg-surface hover:border-primary/40 hover:bg-white/5"
+                  ? "border-transparent bg-primary/5 hover:bg-primary/10"
+                  : "border-transparent hover:bg-white/8"
               }`}
             >
               <span className="font-medium text-sm line-clamp-2">
@@ -224,19 +224,19 @@ export default function FeedGrid({ onBack }: { onBack?: () => void }) {
                 <MoreVertical size={14} />
               </button>
               {menuOpenId === feed.id && (
-                <div className="absolute right-0 top-6 w-44 bg-surface border border-border rounded-lg shadow-xl py-1 z-50 text-sm">
-                  <button onClick={() => { setMenuOpenId(null); handleMarkRead(feed.id); }} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5">
+                <div className="absolute right-0 top-6 w-44 glass-heavy rounded-xl shadow-2xl py-1 z-50 text-sm">
+                  <button onClick={() => { setMenuOpenId(null); handleMarkRead(feed.id); }} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors">
                     <CheckCheck size={14} /> Mark Read
                   </button>
                   {feed.type === "subscription" && (
                     <>
-                      <button onClick={() => handleToggleScrape(feed)} className={`flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5 ${feed.auto_scrape ? "text-primary" : ""}`}>
+                      <button onClick={() => handleToggleScrape(feed)} className={`flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors ${feed.auto_scrape ? "text-primary" : ""}`}>
                         <ScanText size={14} /> {feed.auto_scrape ? "Auto-Scrape: On" : "Auto-Scrape: Off"}
                       </button>
-                      <button onClick={() => { setMenuOpenId(null); setChangeCatFeedId(feed); setTargetCatId("none"); }} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5">
+                      <button onClick={() => { setMenuOpenId(null); setChangeCatFeedId(feed); setTargetCatId("none"); }} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors">
                         <FolderInput size={14} /> Change Category
                       </button>
-                      <button onClick={() => handleDeleteSub(feed)} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/5 text-danger">
+                      <button onClick={() => handleDeleteSub(feed)} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors text-danger">
                         <Trash2 size={14} /> Delete Feed
                       </button>
                     </>
@@ -251,14 +251,14 @@ export default function FeedGrid({ onBack }: { onBack?: () => void }) {
 
       {/* Change category modal */}
       {changeCatFeedId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="glass-heavy rounded-2xl p-6 w-full max-w-sm">
             <h2 className="font-semibold mb-4">Change Category</h2>
             <form onSubmit={handleChangeCategory} className="space-y-3">
               <select
                 value={targetCatId}
                 onChange={(e) => setTargetCatId(e.target.value)}
-                className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors"
               >
                 <option value="none">-- Uncategorized --</option>
                 {catsData?.categories.map((c) => (
@@ -266,8 +266,8 @@ export default function FeedGrid({ onBack }: { onBack?: () => void }) {
                 ))}
               </select>
               <div className="flex gap-2">
-                <button type="button" onClick={() => setChangeCatFeedId(null)} className="flex-1 py-2 rounded-lg border border-border text-sm hover:bg-white/5">Cancel</button>
-                <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover">Move</button>
+                <button type="button" onClick={() => setChangeCatFeedId(null)} className="flex-1 py-2 rounded-lg text-sm hover:bg-white/8 transition-colors">Cancel</button>
+                <button type="submit" className="flex-1 py-2 rounded-lg bg-primary text-sm font-medium hover:bg-primary-hover transition-all hover:shadow-[0_0_16px_rgb(var(--primary)/0.35)]">Move</button>
               </div>
             </form>
           </div>

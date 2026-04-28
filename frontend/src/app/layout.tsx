@@ -59,6 +59,9 @@ function ThemeSync() {
           applyCustomColors(data.ui_custom_colors);
           try { localStorage.setItem("ff_custom_colors", data.ui_custom_colors); } catch {}
         }
+        const glassOn = data?.ui_glass_mode !== false;
+        document.documentElement.setAttribute("data-glass", glassOn ? "on" : "off");
+        try { localStorage.setItem("ff_glass_mode", glassOn ? "on" : "off"); } catch {}
         // Apply reader typography as CSS custom properties with per-breakpoint overrides
         const dFamily = data?.reader_font_family || "system-ui, -apple-system, sans-serif";
         const dSize   = data?.reader_font_size   || "1.15rem";
@@ -95,6 +98,8 @@ const ANTI_FOUC_SCRIPT = `(function(){
   try {
     var t = localStorage.getItem('ff_theme') || 'default';
     document.documentElement.setAttribute('data-theme', t);
+    var gm = localStorage.getItem('ff_glass_mode');
+    document.documentElement.setAttribute('data-glass', gm === 'off' ? 'off' : 'on');
     var a = localStorage.getItem('ff_accent');
     if (a && /^#[0-9a-fA-F]{6}$/.test(a)) {
       var r=parseInt(a.slice(1,3),16), g=parseInt(a.slice(3,5),16), b=parseInt(a.slice(5,7),16);
@@ -158,7 +163,7 @@ export default function RootLayout({
         {/* Anti-FOUC: runs synchronously before CSS to set data-theme immediately */}
         <script dangerouslySetInnerHTML={{ __html: ANTI_FOUC_SCRIPT }} />
         <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
         <meta name="theme-color" content="#141414" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />

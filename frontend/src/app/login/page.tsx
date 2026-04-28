@@ -43,8 +43,12 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <div className="w-full max-w-sm">
+    <div className="min-h-screen flex items-center justify-center bg-background p-4 relative overflow-hidden">
+      {/* Ambient glow behind the card */}
+      <div className="absolute inset-0 pointer-events-none">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[400px] rounded-full bg-primary/8 blur-3xl" />
+      </div>
+      <div className="glass-heavy rounded-3xl p-8 w-full max-w-sm relative">
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
           <Image src="/logo.png" alt="Feed Factory" width={48} height={48} className="invert dark:invert-0 mb-3" />
@@ -54,7 +58,7 @@ export default function LoginPage() {
 
         {/* Demo credentials hint */}
         {demoInfo && (
-          <div className="mb-6 p-4 bg-surface border border-border rounded-xl text-sm">
+          <div className="mb-6 p-4 glass-card rounded-xl text-sm">
             <p className="text-muted mb-1">Demo credentials:</p>
             <p className="font-mono">
               <span className="text-muted">User: </span>
@@ -75,7 +79,7 @@ export default function LoginPage() {
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              className="w-full bg-surface border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-primary transition-colors"
+              className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-primary transition-colors"
               autoComplete="username"
               required
             />
@@ -86,7 +90,7 @@ export default function LoginPage() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-surface border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-primary transition-colors"
+              className="w-full bg-background/60 border border-white/10 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-primary transition-colors"
               autoComplete="current-password"
               required
             />
@@ -99,7 +103,7 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-2.5 rounded-lg bg-primary text-white font-medium text-sm hover:bg-primary-hover transition-colors disabled:opacity-50"
+            className="w-full py-2.5 rounded-lg bg-primary text-white font-medium text-sm hover:bg-primary-hover transition-all hover:shadow-[0_0_20px_rgb(var(--primary)/0.4)] disabled:opacity-50"
           >
             {loading ? "Signing in..." : "Sign in"}
           </button>

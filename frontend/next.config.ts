@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  transpilePackages: ["react-markdown"],
   async rewrites() {
     const backendUrl = process.env.BACKEND_URL || "http://feedfactory:8000";
     return [

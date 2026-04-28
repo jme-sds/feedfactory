@@ -55,6 +55,7 @@ export interface Category {
   name: string;
   unread_count: number;
   newest_ts: number;
+  has_subscriptions: boolean;
 }
 
 export interface CategoriesResponse {
@@ -178,10 +179,16 @@ export interface Settings {
   ui_theme: string;
   ui_accent?: string;
   ui_custom_colors?: string;
+  ui_glass_mode?: boolean;
   default_hdbscan_min_cluster_size: number;
   default_hdbscan_min_samples: number;
   default_hdbscan_cluster_selection_epsilon: number;
   default_hdbscan_cluster_selection_method: string;
+  embed_source: "local" | "api";
+  embed_api_endpoint: string;
+  embed_api_key_is_set: boolean;
+  embed_model_name: string;
+  embed_same_as_generative: boolean;
 }
 
 export interface AuthStatus {
@@ -382,9 +389,15 @@ export const collections = {
 
 // --- Settings ---
 
+export interface EmbeddingStats {
+  total_articles: number;
+  embedded_count: number;
+  estimated_tokens: number;
+}
+
 export const settings = {
   get: () => apiFetch<Settings>("/api/settings"),
-  update: (data: Partial<Settings> & { api_key?: string }) =>
+  update: (data: Partial<Settings> & { api_key?: string; embed_api_key?: string }) =>
     apiFetch<{ ok: boolean }>("/api/settings/update", {
       method: "POST",
       body: JSON.stringify(data),
@@ -394,6 +407,14 @@ export const settings = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  testEmbedding: (data: { embed_source: string; embed_api_endpoint?: string; embed_api_key?: string; embed_model_name?: string; embed_same_as_generative?: boolean }) =>
+    apiFetch<{ ok: boolean; message: string }>("/api/settings/test_embedding", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  embeddingStats: () => apiFetch<EmbeddingStats>("/api/settings/embedding-stats"),
+  reembed: () => apiFetch<{ ok: boolean }>("/api/settings/reembed", { method: "POST" }),
+  reembedStatus: () => apiFetch<{ running: boolean; processed: number; total: number; error: string | null }>("/api/settings/reembed/status"),
   backup: () => window.open("/api/settings/backup"),
   restore: (file: File) => {
     const fd = new FormData();
@@ -461,4 +482,66 @@ export const topicTags = {
 
 export const status = {
   get: () => apiFetch<Record<number, StatusEntry>>("/status.json"),
+};
+
+// --- Chat ---
+
+export interface ChatConversation {
+  id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  rag_enabled: boolean;
+  source_category_ids: number[];
+}
+
+export interface ChatMessage {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+  retrieved_article_ids: number[];
+}
+
+export const chat = {
+  listConversations: () =>
+    apiFetch<ChatConversation[]>("/api/chat/conversations"),
+
+  createConversation: (title?: string) =>
+    apiFetch<ChatConversation>("/api/chat/conversations", {
+      method: "POST",
+      body: JSON.stringify({ title: title ?? "New Conversation" }),
+    }),
+
+  updateConversation: (
+    id: number,
+    data: Partial<Pick<ChatConversation, "title" | "rag_enabled" | "source_category_ids">>
+  ) =>
+    apiFetch<{ ok: boolean }>(`/api/chat/conversations/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+
+  deleteConversation: (id: number) =>
+    apiFetch<void>(`/api/chat/conversations/${id}`, { method: "DELETE" }),
+
+  getMessages: (conversationId: number) =>
+    apiFetch<ChatMessage[]>(`/api/chat/conversations/${conversationId}/messages`),
+
+  sendMessage: (conversationId: number, content: string) =>
+    apiFetch<ChatMessage>(`/api/chat/conversations/${conversationId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
+
+  renameAI: (conversationId: number) =>
+    apiFetch<{ title: string }>(
+      `/api/chat/conversations/${conversationId}/rename_ai`,
+      { method: "POST" }
+    ),
+
+  getArticlesByIds: (ids: number[]) => {
+    if (!ids.length) return Promise.resolve<Article[]>([]);
+    return apiFetch<Article[]>(`/api/chat/articles?ids=${ids.join(",")}`);
+  },
 };
