@@ -54,11 +54,11 @@ _APP_START_TIME: float = _time.time()
 
 # --- UPDATE YOUR INITIAL PROMPT CONSTANT ---
 INITIAL_SYSTEM_PROMPT = """You are an expert news editor. You have been given a list of highly related articles about a specific topic.
-Your goal is to write a single cohesive narrative paragraph for this topic.
+Your goal is to write a cohesive multi-paragraph narrative for this topic.
 
-Write a HIGH-LEVEL NARRATIVE PARAGRAPH (4-6 sentences) that synthesizes the news. Explain "what is going on" by weaving the facts together.
+Write 2–4 SHORT PARAGRAPHS that synthesize the news. Each paragraph should cover a distinct angle or development. Explain "what is going on" by weaving the facts together.
 
-Output only the paragraph text. Do NOT include a title, headings, HTML tags, bullet points, or source lists."""
+Output only the paragraph text separated by blank lines. Do NOT include a title, headings, HTML tags, bullet points, or source lists."""
 
 TITLE_SYSTEM_PROMPT = """You are a news editor. Given a list of article titles about a single topic cluster, produce a short, punchy headline (5–10 words) that captures the shared theme.
 
@@ -905,10 +905,14 @@ def generate_digest_for_collection(collection_id: int):
                 user_msg = (
                     f"Here are the related articles for this topic:\n\n{context}"
                     + historical_block
-                    + "\n\nWrite the narrative paragraph for this topic."
+                    + "\n\nWrite the narrative for this topic."
                 )
 
-                llm_narrative = f"<p>{html.escape(call_llm(settings, user_msg, active_prompt).strip())}</p>"
+                raw_text = call_llm(settings, user_msg, active_prompt).strip()
+                paragraphs = [p.strip() for p in raw_text.split('\n\n') if p.strip()]
+                if not paragraphs:
+                    paragraphs = [raw_text]
+                llm_narrative = "\n".join(f"<p>{html.escape(p)}</p>" for p in paragraphs)
 
                 # 3. Programmatically build the Sources list
                 sources_html = "\n<h5 style='margin-top: 1rem; margin-bottom: 0.5rem; color: #888;'>Sources:</h5>\n<ul style='font-size: 0.9rem; margin-bottom: 1.5rem;'>\n"
@@ -2969,9 +2973,18 @@ def api_get_feeds_by_category(category_id: str):
         read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
         feeds_list = []
 
+        # All collections appear as feed tiles in the AI Digest category
+        ai_digest_cat = session.exec(select(Category).where(Category.name == "AI Digest")).first()
+        is_ai_digest = (
+            ai_digest_cat is not None and
+            category_id not in ["all", "none"] and
+            str(ai_digest_cat.id) == category_id
+        )
+
         cols = session.exec(select(Collection)).all()
         for col in cols:
             if (category_id == "all" or
+                    is_ai_digest or
                     (category_id == "none" and col.category_id is None) or
                     (category_id not in ["all", "none"] and str(col.category_id) == category_id)):
                 kw_list = [k.strip() for k in (col.focus_keywords or "").split(",") if k.strip()]
