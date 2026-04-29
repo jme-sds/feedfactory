@@ -4,10 +4,139 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { settings, topicTags as topicTagsApi, type Settings, type TopicTag } from "@/lib/api";
 import TopBar from "@/components/layout/TopBar";
 import BottomNav from "@/components/layout/BottomNav";
-import { ChevronDown, ChevronRight, Check, Zap, Upload, Plus, Trash2, RefreshCw, Tag, Database } from "lucide-react";
+import { ChevronDown, ChevronRight, Check, Zap, Upload, Plus, Trash2, RefreshCw, Tag, Database, Activity, Cpu, HardDrive } from "lucide-react";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/api";
+
+function StatCard({ label, value, icon }: { label: string; value: string; icon?: React.ReactNode }) {
+  return (
+    <div className="glass-card rounded-lg px-3 py-2.5 flex flex-col gap-0.5">
+      <div className="flex items-center gap-1.5 text-xs text-muted">{icon}{label}</div>
+      <span className="text-sm font-semibold text-fg">{value}</span>
+    </div>
+  );
+}
+
+function ResourceBar({ label, percent, detail, icon, accent = "bg-primary" }: {
+  label: string; percent: number; detail: string; icon?: React.ReactNode; accent?: string;
+}) {
+  const w = Math.min(100, Math.max(0, percent));
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-xs text-muted">
+        <div className="flex items-center gap-1.5">{icon}<span>{label}</span></div>
+        <span className="text-fg">{detail}</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-border overflow-hidden">
+        <div className={`h-full rounded-full transition-all duration-500 ${accent}`} style={{ width: `${w}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function ContainerStatsSection({ openSection, setOpenSection }: { openSection: string; setOpenSection: (id: string) => void }) {
+  const qc = useQueryClient();
+  const { data: stats, isLoading } = useQuery({
+    queryKey: ["system-stats"],
+    queryFn: settings.systemStats,
+    refetchInterval: 60_000,
+    staleTime: 50_000,
+  });
+
+  return (
+    <Section id="container-stats" title="Container Stats" openSection={openSection} setOpenSection={setOpenSection}>
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-muted">
+          Live container resource usage. Auto-refreshes every 60 s.
+          {stats && <> · Uptime: <span className="text-fg">{stats.host.uptime_formatted}</span></>}
+        </p>
+        <button onClick={() => qc.invalidateQueries({ queryKey: ["system-stats"] })}
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs hover:bg-white/8 transition-all text-muted">
+          <RefreshCw size={12} /> Refresh
+        </button>
+      </div>
+
+      {isLoading ? (
+        <div className="flex justify-center py-4"><div className="spinner" /></div>
+      ) : !stats ? (
+        <p className="text-xs text-muted">Could not load stats.</p>
+      ) : (
+        <div className="space-y-4">
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wide mb-2">Articles</p>
+            <div className="grid grid-cols-2 gap-2">
+              <StatCard label="Total Articles" value={stats.articles.total.toLocaleString()} />
+              <StatCard label="Reader Articles" value={stats.articles.reader_articles.toLocaleString()} />
+              <StatCard label="AI Digest Articles" value={stats.articles.digest_articles.toLocaleString()} />
+              <StatCard label="With Embeddings" value={stats.articles.with_embeddings.toLocaleString()} />
+              <StatCard label="With Full Content" value={stats.articles.with_scraped_content.toLocaleString()} />
+            </div>
+          </div>
+
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wide mb-2">Engagement</p>
+            <div className="grid grid-cols-2 gap-2">
+              <StatCard label="Total Read" value={stats.engagement.read_count.toLocaleString()} />
+              <StatCard label="Favorites" value={stats.engagement.favorites_count.toLocaleString()} />
+              <StatCard label="Topic Tags Applied" value={stats.engagement.topic_tags_assigned.toLocaleString()} />
+              <StatCard label="Personal Tags Applied" value={stats.engagement.personal_tags_assigned.toLocaleString()} />
+            </div>
+          </div>
+
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wide mb-2">Disk Usage</p>
+            <div className="grid grid-cols-3 gap-2">
+              <StatCard label="Database" value={stats.storage.db_formatted} icon={<Database size={12} />} />
+              <StatCard label="XML Feeds" value={stats.storage.feeds_dir_formatted} icon={<HardDrive size={12} />} />
+              <StatCard label="Total Data Dir" value={stats.storage.data_dir_formatted} icon={<HardDrive size={12} />} />
+            </div>
+          </div>
+
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wide mb-2">
+              Current Usage
+              <span className="ml-2 font-normal normal-case text-muted">
+                ({stats.host.cpu_count} CPU {stats.host.cpu_count === 1 ? "core" : "cores"} · {stats.host.ram_total_formatted} RAM)
+              </span>
+            </p>
+            <div className="space-y-2">
+              <ResourceBar label="CPU" percent={stats.current.cpu_percent}
+                detail={`${stats.current.cpu_percent.toFixed(1)}%`} icon={<Cpu size={12} />} />
+              <ResourceBar label="RAM" percent={stats.current.ram_percent}
+                detail={`${stats.current.ram_used_formatted} / ${stats.host.ram_total_formatted} (${stats.current.ram_percent.toFixed(1)}%)`}
+                icon={<Activity size={12} />} />
+            </div>
+          </div>
+
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wide mb-2">7-Day History</p>
+            {!stats.history ? (
+              <p className="text-xs text-muted glass-card rounded-lg px-3 py-3">
+                No historical data yet — samples collect every 10 minutes.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-xs text-muted">
+                  Based on {stats.history.sample_count.toLocaleString()} samples since {new Date(stats.history.oldest_sample_at).toLocaleDateString()}.
+                </p>
+                <ResourceBar label="CPU avg" percent={stats.history.cpu_avg_percent}
+                  detail={`${stats.history.cpu_avg_percent.toFixed(1)}% avg`} icon={<Cpu size={12} />} />
+                <ResourceBar label="CPU peak" percent={stats.history.cpu_peak_percent}
+                  detail={`${stats.history.cpu_peak_percent.toFixed(1)}% peak`} icon={<Cpu size={12} />} accent="bg-yellow-500" />
+                <ResourceBar label="RAM avg" percent={stats.history.ram_avg_percent}
+                  detail={`${stats.history.ram_avg_formatted} avg (${stats.history.ram_avg_percent.toFixed(1)}%)`} icon={<Activity size={12} />} />
+                <ResourceBar label="RAM peak" percent={stats.history.ram_peak_percent}
+                  detail={`${stats.history.ram_peak_formatted} peak (${stats.history.ram_peak_percent.toFixed(1)}%)`}
+                  icon={<Activity size={12} />} accent="bg-yellow-500" />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
 
 function TopicTagsSection({ openSection, setOpenSection }: { openSection: string; setOpenSection: (id: string) => void }) {
   const qc = useQueryClient();
@@ -1028,6 +1157,9 @@ export default function SettingsPage() {
               <input type="number" value={form.pwa_offline_limit ?? 200} onChange={set("pwa_offline_limit")} className={inputClass} min={10} max={1000} />
             </div>
           </Section>
+
+          {/* Container Stats */}
+          <ContainerStatsSection openSection={openSection} setOpenSection={setOpenSection} />
 
           {/* Topic Tags */}
           <TopicTagsSection openSection={openSection} setOpenSection={setOpenSection} />

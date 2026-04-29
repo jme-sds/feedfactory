@@ -16,4 +16,5 @@ hdbscan
 spacy
 textblob
 sqlite-vec
+psutil
 

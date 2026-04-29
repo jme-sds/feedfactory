@@ -15,7 +15,8 @@ async function downloadFile(path: string, filename: string): Promise<void> {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  // Defer revocation so the browser has time to initiate the async download
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 function getCsrfToken(): string {
@@ -413,6 +414,55 @@ export interface EmbeddingStats {
   estimated_tokens: number;
 }
 
+export interface SystemStats {
+  articles: {
+    total: number;
+    reader_articles: number;
+    digest_articles: number;
+    with_embeddings: number;
+    with_scraped_content: number;
+  };
+  engagement: {
+    read_count: number;
+    favorites_count: number;
+    topic_tags_assigned: number;
+    personal_tags_assigned: number;
+  };
+  storage: {
+    data_dir_bytes: number;
+    db_bytes: number;
+    feeds_dir_bytes: number;
+    data_dir_formatted: string;
+    db_formatted: string;
+    feeds_dir_formatted: string;
+  };
+  host: {
+    cpu_count: number;
+    ram_total_bytes: number;
+    ram_total_formatted: string;
+    uptime_seconds: number;
+    uptime_formatted: string;
+  };
+  current: {
+    cpu_percent: number;
+    ram_used_bytes: number;
+    ram_used_formatted: string;
+    ram_percent: number;
+  };
+  history: {
+    sample_count: number;
+    oldest_sample_at: string;
+    cpu_avg_percent: number;
+    cpu_peak_percent: number;
+    ram_avg_bytes: number;
+    ram_peak_bytes: number;
+    ram_avg_formatted: string;
+    ram_peak_formatted: string;
+    ram_avg_percent: number;
+    ram_peak_percent: number;
+  } | null;
+}
+
 export const settings = {
   get: () => apiFetch<Settings>("/api/settings"),
   update: (data: Partial<Settings> & { api_key?: string; embed_api_key?: string }) =>
@@ -431,6 +481,7 @@ export const settings = {
       body: JSON.stringify(data),
     }),
   embeddingStats: () => apiFetch<EmbeddingStats>("/api/settings/embedding-stats"),
+  systemStats: () => apiFetch<SystemStats>("/api/settings/system-stats"),
   reembed: () => apiFetch<{ ok: boolean }>("/api/settings/reembed", { method: "POST" }),
   reembedStatus: () => apiFetch<{ running: boolean; processed: number; total: number; error: string | null }>("/api/settings/reembed/status"),
   backup: () => window.open("/api/settings/backup"),

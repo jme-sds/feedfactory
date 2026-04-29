@@ -40,6 +40,7 @@ import gc
 from textblob import TextBlob
 import spacy
 import hdbscan
+import psutil
 
 
 
@@ -48,6 +49,8 @@ logger = logging.getLogger("FeedFactory")
 
 DB_FILE = "/app/data/database.db"
 DATABASE_URL = f"sqlite:///{DB_FILE}"
+import time as _time
+_APP_START_TIME: float = _time.time()
 
 # --- UPDATE YOUR INITIAL PROMPT CONSTANT ---
 INITIAL_SYSTEM_PROMPT = """You are an expert news editor. You have been given a list of highly related articles about a specific topic.
@@ -321,6 +324,16 @@ class ChatMessage(SQLModel, table=True):
     retrieved_article_ids: str = Field(default="[]")  # JSON array of CachedArticle IDs
 
 
+class MetricsSnapshot(SQLModel, table=True):
+    """10-minute samples of container CPU and RAM usage for historical stats."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    sampled_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow, index=True)
+    cpu_percent: float       # psutil.cpu_percent(interval=1), 0–100 per logical CPU
+    ram_used_bytes: int      # psutil.virtual_memory().used
+    ram_total_bytes: int     # psutil.virtual_memory().total
+    cpu_count: int           # psutil.cpu_count(logical=True)
+
+
 # --- Helpers ---
 def clean_model_id(raw_id: str) -> str:
     if not raw_id: return ""
@@ -435,6 +448,15 @@ def sync_all_feeds():
     logger.info("Starting background feed sync...")
     newly_inserted_links: List[str] = []
     with Session(engine) as session:
+        ai_digest_cat = session.exec(select(Category).where(Category.name == "AI Digest")).first()
+        ai_digest_category_id = ai_digest_cat.id if ai_digest_cat else None
+        # Backfill any digest articles that lost their category (e.g. if AI Digest was deleted and recreated)
+        if ai_digest_category_id is not None:
+            session.execute(
+                text("UPDATE cachedarticle SET category_id = :cid WHERE is_generated = 1 AND category_id IS NULL"),
+                {"cid": ai_digest_category_id}
+            )
+
         collections = session.exec(select(Collection)).all()
         for col in collections:
             path = f"/app/data/feeds/{col.slug}.xml"
@@ -447,7 +469,7 @@ def sync_all_feeds():
                             session.add(CachedArticle(
                                 ui_id=str(hash(entry.link)), feed_id=f"col_{col.id}", link=entry.link, title=entry.title, display_body=body,
                                 published=parse_date(entry), source_title=f"✨ {col.name}", source_color="#1095c1",
-                                is_generated=True, category_id=col.category_id
+                                is_generated=True, category_id=ai_digest_category_id
                             ))
                             newly_inserted_links.append(entry.link)
                 except Exception as e: logger.error(f"Sync error (Collection {col.name}): {e}")
@@ -529,7 +551,8 @@ def sync_all_feeds():
             orphans = session.exec(
                 select(CachedArticle).where(
                     CachedArticle.feed_id == f"sub_{sub.id}",
-                    CachedArticle.category_id == None
+                    CachedArticle.category_id == None,
+                    CachedArticle.is_generated == False
                 )
             ).all()
             for art in orphans:
@@ -1021,6 +1044,14 @@ def upgrade_db_schema(engine):
                     GROUP BY article_id, tag_id
                 )
             """))
+            # Migrate existing digest articles to the AI Digest category.
+            # Idempotent: if AI Digest doesn't exist the subquery returns NULL and no rows match.
+            session.execute(text("""
+                UPDATE cachedarticle
+                SET category_id = (SELECT id FROM category WHERE name = 'AI Digest' LIMIT 1)
+                WHERE is_generated = 1
+                  AND category_id IS NOT (SELECT id FROM category WHERE name = 'AI Digest' LIMIT 1)
+            """))
             session.commit()
         except Exception as e:
             logger.warning(f"[Migration] NULL backfill failed (may be expected on first run): {e}")
@@ -1229,6 +1260,27 @@ def run_nightly_prune():
         collections = session.exec(select(Collection)).all()
     for col in collections:
         prune_stale_vectors(col.rag_eviction_days)
+
+
+def collect_metrics_snapshot():
+    """Sample current CPU and RAM; prune samples older than 8 days."""
+    try:
+        cpu = psutil.cpu_percent(interval=1)  # blocks 1 s for accurate reading
+        vm = psutil.virtual_memory()
+        snap = MetricsSnapshot(
+            cpu_percent=cpu,
+            ram_used_bytes=vm.used,
+            ram_total_bytes=vm.total,
+            cpu_count=psutil.cpu_count(logical=True) or 1,
+        )
+        cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=8)
+        with Session(engine) as session:
+            session.add(snap)
+            session.execute(text("DELETE FROM metricssnapshot WHERE sampled_at < :c"), {"c": cutoff})
+            session.commit()
+        logger.debug("[Metrics] Snapshot recorded.")
+    except Exception as e:
+        logger.warning(f"[Metrics] collect_metrics_snapshot failed: {e}")
 
 
 # ==========================================
@@ -2251,6 +2303,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(sync_all_feeds, 'interval', minutes=15)
     scheduler.add_job(cleanup_old_articles, 'interval', hours=1)
     scheduler.add_job(run_nightly_prune, 'cron', hour=3, minute=0)
+    scheduler.add_job(collect_metrics_snapshot, 'interval', minutes=10)
     if _demo_mode_boot:
         scheduler.add_job(demo_restore_snapshot, 'cron', hour=4, minute=0)
     scheduler.start()
@@ -2878,6 +2931,8 @@ async def api_rename_category(cat_id: int, request: Request):
 def api_delete_category(cat_id: int):
     with Session(engine) as session:
         cat = session.get(Category, cat_id)
+        if cat and cat.name == "AI Digest":
+            raise HTTPException(status_code=400, detail="The AI Digest category cannot be deleted.")
         if cat:
             for sub in session.exec(select(Subscription).where(Subscription.category_id == cat_id)).all():
                 sub.category_id = None; session.add(sub)
@@ -3045,6 +3100,15 @@ def api_delete_subscription(sub_id: int):
             session.commit()
     return Response(status_code=204)
 
+def _opml_response(root: ET.Element, filename: str) -> Response:
+    xml_str = ET.tostring(root, encoding="unicode", xml_declaration=False)
+    xml_str = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_str
+    return Response(
+        content=xml_str,
+        media_type="application/xml",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
 def export_subscriptions_opml():
     with Session(engine) as session:
         subs = session.exec(select(Subscription)).all()
@@ -3066,13 +3130,7 @@ def export_subscriptions_opml():
                       text=sub.title or sub.url,
                       title=sub.title or sub.url,
                       xmlUrl=sub.url)
-    xml_str = ET.tostring(root, encoding="unicode", xml_declaration=False)
-    xml_str = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_str
-    return Response(
-        content=xml_str,
-        media_type="application/xml",
-        headers={"Content-Disposition": "attachment; filename=subscriptions.opml"},
-    )
+    return _opml_response(root, "subscriptions.opml")
 
 @app.get("/api/subscriptions/export.opml")
 def api_export_subscriptions_opml():
@@ -3702,13 +3760,7 @@ def export_opml(cid: int):
     body = ET.SubElement(root, "body")
     for feed in feeds:
         ET.SubElement(body, "outline", type="rss", text=feed.url, xmlUrl=feed.url)
-    xml_str = ET.tostring(root, encoding="unicode", xml_declaration=False)
-    xml_str = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_str
-    return Response(
-        content=xml_str,
-        media_type="application/xml",
-        headers={"Content-Disposition": f"attachment; filename={col.slug}.opml"},
-    )
+    return _opml_response(root, f"{col.slug}.opml")
 
 @app.get("/api/collections/{cid}/export.opml")
 def api_export_collection_opml(cid: int):
@@ -4113,6 +4165,137 @@ def api_embedding_stats():
         "total_articles": total_articles,
         "embedded_count": embedded_count,
         "estimated_tokens": estimated_tokens,
+    }
+
+
+def _fmt_bytes(n: int) -> str:
+    """Human-readable byte size."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+def _dir_size(path: str) -> int:
+    """Total byte size of all files directly within a directory (non-recursive)."""
+    total = 0
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.is_file(follow_symlinks=False):
+                    total += entry.stat().st_size
+    except (FileNotFoundError, PermissionError):
+        pass
+    return total
+
+
+@app.get("/api/settings/system-stats")
+def api_system_stats():
+    # --- Article counts ---
+    with Session(engine) as session:
+        total_articles = session.execute(text("SELECT COUNT(*) FROM cachedarticle")).scalar() or 0
+        digest_count = session.execute(text("SELECT COUNT(*) FROM cachedarticle WHERE is_generated = 1")).scalar() or 0
+        with_embed = session.execute(text("SELECT COUNT(*) FROM articleembedding")).scalar() or 0
+        with_scrape = session.execute(text(
+            "SELECT COUNT(*) FROM cachedarticle WHERE scraped_content IS NOT NULL AND scraped_content != ''"
+        )).scalar() or 0
+        read_count = session.execute(text("SELECT COUNT(*) FROM readitem")).scalar() or 0
+        fav_count = session.execute(text("SELECT COUNT(*) FROM favoriteitem WHERE unfavorited_at IS NULL")).scalar() or 0
+        topic_assigned = session.execute(text("SELECT COUNT(*) FROM articletopiactag")).scalar() or 0
+        personal_assigned = session.execute(text("SELECT COUNT(*) FROM articlepersonaltag WHERE label = 1")).scalar() or 0
+
+    # --- Storage ---
+    db_bytes = 0
+    for suffix in ("", "-shm", "-wal"):
+        try:
+            db_bytes += os.stat(DB_FILE + suffix).st_size
+        except OSError:
+            pass
+    feeds_bytes = _dir_size("/app/data/feeds")
+    data_dir_extra = 0
+    try:
+        with os.scandir("/app/data") as it:
+            for entry in it:
+                if entry.is_file(follow_symlinks=False):
+                    data_dir_extra += entry.stat().st_size
+    except (FileNotFoundError, PermissionError):
+        pass
+
+    # --- Host context ---
+    cpu_count = psutil.cpu_count(logical=True) or 1
+    vm = psutil.virtual_memory()
+    uptime_sec = int(_time.time() - _APP_START_TIME)
+    days, rem = divmod(uptime_sec, 86400)
+    hours, mins = divmod(rem, 3600)
+    uptime_str = f"{days}d {hours}h {mins // 60}m" if days else f"{hours}h {mins // 60}m"
+
+    # --- Historical metrics (7-day window) ---
+    week_ago = datetime.datetime.utcnow() - datetime.timedelta(days=7)
+    history = None
+    with Session(engine) as session:
+        rows = session.execute(
+            text("SELECT cpu_percent, ram_used_bytes, ram_total_bytes, sampled_at FROM metricssnapshot WHERE sampled_at >= :since ORDER BY sampled_at ASC"),
+            {"since": week_ago},
+        ).fetchall()
+    if rows:
+        cpu_vals = [r[0] for r in rows]
+        ram_vals = [r[1] for r in rows]
+        ram_total_ref = rows[-1][2]
+        cpu_avg = sum(cpu_vals) / len(cpu_vals)
+        cpu_peak = max(cpu_vals)
+        ram_avg = int(sum(ram_vals) / len(ram_vals))
+        ram_peak = max(ram_vals)
+        oldest = rows[0][3]
+        history = {
+            "sample_count": len(rows),
+            "oldest_sample_at": oldest.isoformat() if hasattr(oldest, "isoformat") else str(oldest),
+            "cpu_avg_percent": round(cpu_avg, 1),
+            "cpu_peak_percent": round(cpu_peak, 1),
+            "ram_avg_bytes": ram_avg,
+            "ram_peak_bytes": ram_peak,
+            "ram_avg_formatted": _fmt_bytes(ram_avg),
+            "ram_peak_formatted": _fmt_bytes(ram_peak),
+            "ram_avg_percent": round(ram_avg / ram_total_ref * 100, 1) if ram_total_ref else 0,
+            "ram_peak_percent": round(ram_peak / ram_total_ref * 100, 1) if ram_total_ref else 0,
+        }
+
+    return {
+        "articles": {
+            "total": total_articles,
+            "reader_articles": total_articles - digest_count,
+            "digest_articles": digest_count,
+            "with_embeddings": with_embed,
+            "with_scraped_content": with_scrape,
+        },
+        "engagement": {
+            "read_count": read_count,
+            "favorites_count": fav_count,
+            "topic_tags_assigned": topic_assigned,
+            "personal_tags_assigned": personal_assigned,
+        },
+        "storage": {
+            "data_dir_bytes": db_bytes + feeds_bytes + data_dir_extra,
+            "db_bytes": db_bytes,
+            "feeds_dir_bytes": feeds_bytes,
+            "data_dir_formatted": _fmt_bytes(db_bytes + feeds_bytes + data_dir_extra),
+            "db_formatted": _fmt_bytes(db_bytes),
+            "feeds_dir_formatted": _fmt_bytes(feeds_bytes),
+        },
+        "host": {
+            "cpu_count": cpu_count,
+            "ram_total_bytes": vm.total,
+            "ram_total_formatted": _fmt_bytes(vm.total),
+            "uptime_seconds": uptime_sec,
+            "uptime_formatted": uptime_str,
+        },
+        "current": {
+            "cpu_percent": round(psutil.cpu_percent(interval=None), 1),
+            "ram_used_bytes": vm.used,
+            "ram_used_formatted": _fmt_bytes(vm.used),
+            "ram_percent": round(vm.percent, 1),
+        },
+        "history": history,
     }
 
 
