@@ -17,6 +17,19 @@ export default function ChatPage() {
   const rootRef = useRef<HTMLDivElement>(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
 
+  // Prevent iOS Safari from scrolling the document viewport while on the chat
+  // page. Even with a position:fixed root, iOS can scroll the document via touch
+  // drag, which makes the entire fixed UI visually shift. Setting overflow:hidden
+  // on body eliminates the document scroll target entirely. Restored on unmount
+  // so other pages are unaffected.
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
+
   // iOS Safari scrolls the document when an input is focused, pushing the whole
   // UI up. Fix: pin the root to position:fixed and use the visualViewport API
   // to keep height and top in sync with the actual visible area.

@@ -214,7 +214,7 @@ function Section({
 export default function SettingsPage() {
   const qc = useQueryClient();
   const router = useRouter();
-  const [openSection, setOpenSection] = useState<string>("ai");
+  const [openSection, setOpenSection] = useState<string>("");
   type CustomColors = { background: string; surface: string; border: string; primary: string; muted: string; fg: string };
   const DEFAULT_CUSTOM_COLORS: CustomColors = { background: "#141414", surface: "#1e1e1e", border: "#333333", primary: "#1095c1", muted: "#888888", fg: "#ffffff" };
   const [form, setForm] = useState<Partial<Settings> & { api_key?: string; embed_api_key?: string; ui_theme?: string; ui_accent?: string; ui_custom_colors?: string }>({});

@@ -1,5 +1,23 @@
 // Typed API client for FeedFactory FastAPI backend
 
+async function downloadFile(path: string, filename: string): Promise<void> {
+  const res = await fetch(path, { credentials: "include" });
+  if (res.status === 401) {
+    if (!window.location.pathname.startsWith("/login")) window.location.href = "/login";
+    throw new Error("Unauthorized");
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function getCsrfToken(): string {
   if (typeof document === "undefined") return "";
   const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]*)/);
@@ -255,7 +273,7 @@ export const subscriptions = {
     apiFetch<{ id: number; auto_scrape: boolean }>(`/api/subscriptions/${id}/toggle_scrape`, { method: "POST" }),
   delete: (id: number) =>
     apiFetch<void>(`/api/subscriptions/${id}`, { method: "DELETE" }),
-  exportOpml: () => window.open("/api/subscriptions/export.opml"),
+  exportOpml: () => downloadFile("/api/subscriptions/export.opml", "subscriptions.opml"),
   importOpml: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
@@ -376,7 +394,7 @@ export const collections = {
     }),
   toggleActive: (id: number) =>
     apiFetch<{ id: number; is_active: boolean }>(`/api/collections/${id}/toggle_active`, { method: "POST" }),
-  exportOpml: (id: number) => window.open(`/api/collections/${id}/export.opml`),
+  exportOpml: (id: number) => downloadFile(`/api/collections/${id}/export.opml`, `collection-${id}.opml`),
   importOpml: (id: number, file: File) => {
     const fd = new FormData();
     fd.append("file", file);

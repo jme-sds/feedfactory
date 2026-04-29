@@ -52,7 +52,7 @@ export default function MessageList({ messages, sending, onArticleClick }: Props
   }
 
   return (
-    <div className="flex-1 overflow-y-auto py-3 space-y-0.5">
+    <div className="flex-1 overflow-y-auto overscroll-y-contain py-3 space-y-0.5">
       {messages.map((msg) => (
         <MessageBubble key={msg.id} message={msg} onArticleClick={onArticleClick} />
       ))}

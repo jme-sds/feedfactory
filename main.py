@@ -3045,6 +3045,35 @@ def api_delete_subscription(sub_id: int):
             session.commit()
     return Response(status_code=204)
 
+def export_subscriptions_opml():
+    with Session(engine) as session:
+        subs = session.exec(select(Subscription)).all()
+        cats = {c.id: c.name for c in session.exec(select(Category)).all()}
+    root = ET.Element("opml", version="2.0")
+    ET.SubElement(root, "head")
+    body = ET.SubElement(root, "body")
+    folders: dict = {}
+    for sub in subs:
+        cat_name = cats.get(sub.category_id) if sub.category_id else None
+        if cat_name:
+            if cat_name not in folders:
+                folders[cat_name] = ET.SubElement(body, "outline", text=cat_name, title=cat_name)
+            parent = folders[cat_name]
+        else:
+            parent = body
+        ET.SubElement(parent, "outline",
+                      type="rss",
+                      text=sub.title or sub.url,
+                      title=sub.title or sub.url,
+                      xmlUrl=sub.url)
+    xml_str = ET.tostring(root, encoding="unicode", xml_declaration=False)
+    xml_str = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_str
+    return Response(
+        content=xml_str,
+        media_type="application/xml",
+        headers={"Content-Disposition": "attachment; filename=subscriptions.opml"},
+    )
+
 @app.get("/api/subscriptions/export.opml")
 def api_export_subscriptions_opml():
     return export_subscriptions_opml()
@@ -3661,6 +3690,25 @@ def api_toggle_collection_active(cid: int):
         session.add(col)
         session.commit()
         return {"id": col.id, "is_active": col.is_active}
+
+def export_opml(cid: int):
+    with Session(engine) as session:
+        col = session.get(Collection, cid)
+        if not col:
+            raise HTTPException(status_code=404)
+        feeds = session.exec(select(Feed).where(Feed.collection_id == cid)).all()
+    root = ET.Element("opml", version="2.0")
+    ET.SubElement(root, "head")
+    body = ET.SubElement(root, "body")
+    for feed in feeds:
+        ET.SubElement(body, "outline", type="rss", text=feed.url, xmlUrl=feed.url)
+    xml_str = ET.tostring(root, encoding="unicode", xml_declaration=False)
+    xml_str = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_str
+    return Response(
+        content=xml_str,
+        media_type="application/xml",
+        headers={"Content-Disposition": f"attachment; filename={col.slug}.opml"},
+    )
 
 @app.get("/api/collections/{cid}/export.opml")
 def api_export_collection_opml(cid: int):
