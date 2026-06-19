@@ -117,6 +117,7 @@ export interface TopicTag {
   positive_count: number;
   negative_count: number;
   is_ready: boolean;
+  article_count: number;
 }
 
 export interface Article {
@@ -146,6 +147,9 @@ export interface Collection {
   name: string;
   slug: string;
   schedule_time: string;
+  schedule_frequency: "daily" | "weekly" | "monthly";
+  schedule_day_of_week: number;
+  schedule_day_of_month: number;
   last_run: string | null;
   is_generating: boolean;
   is_active: boolean;
@@ -159,6 +163,7 @@ export interface Collection {
   rag_top_k: number;
   rag_min_similarity: number;
   rag_eviction_days: number;
+  rag_search_space: "digest" | "feed";
   hdbscan_min_cluster_size: number;
   hdbscan_min_samples: number;
   hdbscan_cluster_selection_epsilon: number;
@@ -288,11 +293,13 @@ export const subscriptions = {
 // --- Articles ---
 
 export const articles = {
-  list: (params: { category_id?: string; feed_id?: string; limit?: number }) => {
+  list: (params: { category_id?: string; feed_id?: string; limit?: number; topic_tag?: string; entity_text?: string }) => {
     const qs = new URLSearchParams();
     if (params.category_id) qs.set("category_id", params.category_id);
     if (params.feed_id) qs.set("feed_id", params.feed_id);
     if (params.limit) qs.set("limit", String(params.limit));
+    if (params.topic_tag) qs.set("topic_tag", params.topic_tag);
+    if (params.entity_text) qs.set("entity_text", params.entity_text);
     return apiFetch<Article[]>(`/api/articles?${qs}`);
   },
   markRead: (url: string) =>

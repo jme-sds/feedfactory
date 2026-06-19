@@ -10,6 +10,16 @@ export default function CategoryGrid() {
   const qc = useQueryClient();
   const { selectCategory, selectedCategoryId, tagBrowseMode, selectedTagFilter, selectTagFilter, selectedEntityFilter, selectEntityFilter } = useReaderStore();
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
+
+  const openMenu = (e: React.MouseEvent<HTMLButtonElement>, id: string) => {
+    e.stopPropagation();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const menuWidth = 208; // w-52
+    const left = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
+    setMenuPos({ top: rect.bottom + 4, left });
+    setMenuOpenId(menuOpenId === id ? null : id);
+  };
 
   const { data, isLoading } = useQuery({
     queryKey: ["categories"],
@@ -87,10 +97,13 @@ export default function CategoryGrid() {
 
   // Tag browse mode: show TopicTag tiles then entity tiles
   if (tagBrowseMode) {
-    const activeTags = tagList.filter((t) => t.is_active);
+    const activeTags = tagList
+      .filter((t) => t.is_active)
+      .sort((a, b) => b.article_count - a.article_count);
+    const sortedEntities = [...entityList].sort((a, b) => b.count - a.count);
     return (
       <div className="tile-grid">
-        {activeTags.length === 0 && entityList.length === 0 && (
+        {activeTags.length === 0 && sortedEntities.length === 0 && (
           <p className="col-span-full text-xs text-muted text-center py-8">
             No active topic tags. Add tags in Settings.
           </p>
@@ -103,7 +116,7 @@ export default function CategoryGrid() {
             onClick={() => selectTagFilter(selectedTagFilter === tag.name ? null : tag.name)}
           />
         ))}
-        {entityList.map((ent) => (
+        {sortedEntities.map((ent) => (
           <EntityTile
             key={ent.text}
             entity={ent}
@@ -180,15 +193,15 @@ export default function CategoryGrid() {
           </button>
           <div className="absolute top-1.5 right-1.5">
             <button
-              onClick={(e) => { e.stopPropagation(); setMenuOpenId(menuOpenId === `cat-${aiDigest.id}` ? null : `cat-${aiDigest.id}`); }}
+              onClick={(e) => openMenu(e, `cat-${aiDigest.id}`)}
               className="p-1 rounded text-muted hover:text-white"
             >
               <MoreVertical size={14} />
             </button>
-            {menuOpenId === `cat-${aiDigest.id}` && (
-              <CategoryMenu cat={aiDigest} onMarkRead={() => handleMarkRead(String(aiDigest.id))} onRename={() => handleRename(aiDigest)} onDelete={() => handleDelete(aiDigest)} onCreateCollection={() => handleCreateCollection(aiDigest)} />
-            )}
           </div>
+          {menuOpenId === `cat-${aiDigest.id}` && menuPos && (
+            <CategoryMenu menuPos={menuPos} cat={aiDigest} onMarkRead={() => handleMarkRead(String(aiDigest.id))} onRename={() => handleRename(aiDigest)} onDelete={() => handleDelete(aiDigest)} onCreateCollection={() => handleCreateCollection(aiDigest)} />
+          )}
         </div>
       )}
 
@@ -210,15 +223,15 @@ export default function CategoryGrid() {
           </button>
           <div className="absolute top-1.5 right-1.5">
             <button
-              onClick={(e) => { e.stopPropagation(); setMenuOpenId(menuOpenId === `cat-${cat.id}` ? null : `cat-${cat.id}`); }}
+              onClick={(e) => openMenu(e, `cat-${cat.id}`)}
               className="p-1 rounded text-muted hover:text-white"
             >
               <MoreVertical size={14} />
             </button>
-            {menuOpenId === `cat-${cat.id}` && (
-              <CategoryMenu cat={cat} onMarkRead={() => handleMarkRead(String(cat.id))} onRename={() => handleRename(cat)} onDelete={() => handleDelete(cat)} onCreateCollection={() => handleCreateCollection(cat)} />
-            )}
           </div>
+          {menuOpenId === `cat-${cat.id}` && menuPos && (
+            <CategoryMenu menuPos={menuPos} cat={cat} onMarkRead={() => handleMarkRead(String(cat.id))} onRename={() => handleRename(cat)} onDelete={() => handleDelete(cat)} onCreateCollection={() => handleCreateCollection(cat)} />
+          )}
         </div>
       ))}
 
@@ -244,8 +257,11 @@ function TagTile({ tag, isSelected, onClick }: { tag: TopicTag; isSelected: bool
         <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-yellow-400" />
         <span className="font-medium text-sm text-yellow-200 line-clamp-2">{tag.name}</span>
       </div>
+      {tag.article_count > 0 && (
+        <span className="mt-1 text-xs text-yellow-400/70">{tag.article_count} articles</span>
+      )}
       {tag.is_ready && (
-        <span className="mt-1 text-xs text-yellow-400/70">✦ personalized</span>
+        <span className="mt-0.5 text-xs text-yellow-400/50">✦ personalized</span>
       )}
     </button>
   );
@@ -270,12 +286,13 @@ function EntityTile({ entity, isSelected, onClick }: { entity: EntityStat; isSel
         <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
         <span className={`font-medium text-sm line-clamp-2 ${ENTITY_LABEL_COLOR[entity.label] ?? ""}`}>{entity.text}</span>
       </div>
-      <span className="mt-1 text-xs opacity-40">{entity.label}</span>
+      <span className="mt-1 text-xs opacity-40">{entity.count} · {entity.label}</span>
     </button>
   );
 }
 
-function CategoryMenu({ cat, onMarkRead, onRename, onDelete, onCreateCollection }: {
+function CategoryMenu({ menuPos, cat, onMarkRead, onRename, onDelete, onCreateCollection }: {
+  menuPos: { top: number; left: number };
   cat: Category;
   onMarkRead: () => void;
   onRename: () => void;
@@ -283,7 +300,7 @@ function CategoryMenu({ cat, onMarkRead, onRename, onDelete, onCreateCollection 
   onCreateCollection: () => void;
 }) {
   return (
-    <div className="absolute right-0 top-6 w-52 glass-heavy rounded-xl shadow-2xl py-1 z-50 text-sm">
+    <div style={{ top: menuPos.top, left: menuPos.left }} className="fixed w-52 glass-heavy rounded-xl shadow-2xl py-1 z-50 text-sm">
       <button onClick={onMarkRead} className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-white/8 transition-colors">
         <CheckCheck size={14} /> Mark All Read
       </button>

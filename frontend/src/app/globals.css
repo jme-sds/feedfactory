@@ -109,11 +109,6 @@ select {
    become invisible on light backgrounds — override them here.
    ============================================================ */
 
-/* Logo SVG has white strokes; invert to black on light backgrounds */
-[data-theme="light"] .theme-logo,
-[data-theme="sepia"] .theme-logo {
-  filter: invert(1);
-}
 
 [data-theme="light"] .hover\:text-white:hover,
 [data-theme="sepia"] .hover\:text-white:hover {

@@ -51,7 +51,7 @@ export default function LoginPage() {
       <div className="glass-heavy rounded-3xl p-8 w-full max-w-sm relative">
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
-          <Image src="/logo.png" alt="Feed Factory" width={48} height={48} className="invert dark:invert-0 mb-3" />
+          <Image src="/logo.png" alt="Feed Factory" width={48} height={48} className="mb-3" />
           <h1 className="text-2xl font-bold">Feed Factory</h1>
           <p className="text-muted text-sm mt-1">Demo Mode</p>
         </div>

@@ -23,13 +23,14 @@ import concurrent.futures
 import threading
 import html
 import json
+import calendar
 import hmac
 import secrets
 import hashlib
 import socket
 import ipaddress
 from sentence_transformers import SentenceTransformer
-from sklearn.cluster import KMeans
+
 from sklearn.linear_model import SGDClassifier
 import joblib
 import numpy as np
@@ -160,6 +161,9 @@ class Collection(SQLModel, table=True):
     name: str = Field(index=True)
     slug: str = Field(unique=True, index=True)
     schedule_time: str = Field(default="06:00")
+    schedule_frequency: str = Field(default="daily")
+    schedule_day_of_week: int = Field(default=0)
+    schedule_day_of_month: int = Field(default=1)
     last_run: Optional[datetime.datetime] = None
     is_generating: bool = Field(default=False)
     system_prompt: Optional[str] = Field(default=None)
@@ -173,7 +177,8 @@ class Collection(SQLModel, table=True):
     is_active: bool = Field(default=True)
     rag_top_k: int = Field(default=3)
     rag_min_similarity: float = Field(default=0.60)
-    rag_eviction_days: int = Field(default=14)
+    rag_eviction_days: int = Field(default=150)
+    rag_search_space: str = Field(default="digest")  # "digest" or "feed"
     hdbscan_min_cluster_size: int = Field(default=3)
     hdbscan_min_samples: int = Field(default=0)  # 0 = use min_cluster_size (HDBSCAN default)
     hdbscan_cluster_selection_epsilon: float = Field(default=0.0)
@@ -189,6 +194,7 @@ class ArticleVector(SQLModel, table=True):
     last_retrieved_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
     retrieval_count: int = Field(default=0)
     ingested_at: datetime.datetime = Field(default_factory=datetime.datetime.now, index=True)
+    published_at: Optional[datetime.datetime] = Field(default=None)
 
 class Feed(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -591,6 +597,7 @@ def cleanup_old_articles():
                 session.execute(text("DELETE FROM articleentity WHERE article_id = :aid"), {"aid": article.id})
                 session.execute(text("DELETE FROM articleembedding WHERE article_id = :aid"), {"aid": article.id})
                 session.execute(text("DELETE FROM vec_cached_articles WHERE rowid = :aid"), {"aid": article.id})
+                session.execute(text("DELETE FROM articletopiactag WHERE article_id = :aid"), {"aid": article.id})
                 session.delete(article)
                 deleted += 1
                 continue
@@ -600,6 +607,7 @@ def cleanup_old_articles():
                 session.execute(text("DELETE FROM articleentity WHERE article_id = :aid"), {"aid": article.id})
                 session.execute(text("DELETE FROM articleembedding WHERE article_id = :aid"), {"aid": article.id})
                 session.execute(text("DELETE FROM vec_cached_articles WHERE rowid = :aid"), {"aid": article.id})
+                session.execute(text("DELETE FROM articletopiactag WHERE article_id = :aid"), {"aid": article.id})
                 session.delete(article)
                 deleted += 1
         session.commit()
@@ -801,12 +809,19 @@ def generate_digest_for_collection(collection_id: int):
                                 if limit > 0 and len(text_content) > limit:
                                     text_content = text_content[:limit] + "..."
 
+                                pub_dt = None
+                                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                                    pub_dt = datetime.datetime.fromtimestamp(time.mktime(entry.published_parsed))
+                                elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                                    pub_dt = datetime.datetime.fromtimestamp(time.mktime(entry.updated_parsed))
+                                pub_str = (pub_dt or now).strftime("%B %d, %Y")
+
                                 all_entries.append({
-                                    "timestamp": published or now,
+                                    "timestamp": pub_dt or now,
                                     "title": entry.title,
                                     "link": entry.link,
                                     "text": text_content,
-                                    "formatted": f"Title: {entry.title}\nLink: {entry.link}\nText: {text_content}\n"
+                                    "formatted": f"Title: {entry.title}\nDate: {pub_str}\nLink: {entry.link}\nText: {text_content}\n"
                                 })
                     except Exception as e:
                         logger.warning(f"[Digest] ⚠ Error processing feed {feed.url}: {e}")
@@ -820,7 +835,6 @@ def generate_digest_for_collection(collection_id: int):
             all_entries.sort(key=lambda x: x["timestamp"], reverse=True)
             if collection.filter_max_articles > 0:
                 all_entries = all_entries[:collection.filter_max_articles]
-            all_entries = all_entries[:100]
 
             # --- Cluster articles; embeddings stored AFTER generation to keep RAG search space historical-only ---
             article_clusters, current_embeddings = cluster_articles(
@@ -877,6 +891,7 @@ def generate_digest_for_collection(collection_id: int):
                         entity_names=entity_names or None,
                         filter_age=collection.filter_age,
                         last_run=collection.last_run,
+                        search_space=collection.rag_search_space,
                     )
 
                 # 1. Title call: article titles only → short punchy headline
@@ -892,10 +907,12 @@ def generate_digest_for_collection(collection_id: int):
 
                 historical_block = ""
                 if historical:
-                    hist_parts = [
-                        f"Title: {h['title']}\nURL: {h['url']}\nSummary: {h['content']}"
-                        for h in historical
-                    ]
+                    hist_parts = []
+                    for h in historical:
+                        date_line = f"\nDate: {h['date']}" if h.get('date') else ""
+                        hist_parts.append(
+                            f"Title: {h['title']}{date_line}\nURL: {h['url']}\nSummary: {h['content']}"
+                        )
                     historical_block = (
                         "\n\n<historical_context>\n"
                         + "\n---\n".join(hist_parts)
@@ -978,12 +995,22 @@ def scheduled_checker():
             try:
                 target_hour, target_minute = map(int, col.schedule_time.split(":"))
                 target_today = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-                
+
+                freq = col.schedule_frequency or "daily"
+                if freq == "weekly":
+                    if now.weekday() != (col.schedule_day_of_week or 0):
+                        continue
+                elif freq == "monthly":
+                    last_day = calendar.monthrange(now.year, now.month)[1]
+                    effective_day = min(col.schedule_day_of_month or 1, last_day)
+                    if now.day != effective_day:
+                        continue
+
                 if now >= target_today:
                     should_run = False
                     if not col.last_run: should_run = True
                     elif col.last_run < target_today: should_run = True
-                    
+
                     if should_run:
                         from threading import Thread
                         t = Thread(target=generate_digest_for_collection, args=(col.id,))
@@ -1040,6 +1067,9 @@ def upgrade_db_schema(engine):
             session.execute(text("UPDATE globalsettings SET embed_model_name = '' WHERE embed_model_name IS NULL"))
             session.execute(text("UPDATE globalsettings SET embed_same_as_generative = 0 WHERE embed_same_as_generative IS NULL"))
             session.execute(text("UPDATE globalsettings SET embed_dimensions = 384 WHERE embed_dimensions IS NULL"))
+            session.execute(text("UPDATE collection SET schedule_frequency = 'daily' WHERE schedule_frequency IS NULL"))
+            session.execute(text("UPDATE collection SET schedule_day_of_week = 0 WHERE schedule_day_of_week IS NULL"))
+            session.execute(text("UPDATE collection SET schedule_day_of_month = 1 WHERE schedule_day_of_month IS NULL"))
             # Remove duplicate topic tag rows — keep the manual one (or highest id) per (article_id, tag_id)
             session.execute(text("""
                 DELETE FROM articletopiactag
@@ -1056,6 +1086,13 @@ def upgrade_db_schema(engine):
                 WHERE is_generated = 1
                   AND category_id IS NOT (SELECT id FROM category WHERE name = 'AI Digest' LIMIT 1)
             """))
+            # Detach collections from source categories — they now appear in AI Digest regardless
+            # of category_id, so leaving it set only creates orphaned empty tiles in source categories.
+            session.execute(text("UPDATE collection SET category_id = NULL WHERE category_id IS NOT NULL"))
+            # Purge orphaned topic tag assignments for articles that no longer exist
+            session.execute(text(
+                "DELETE FROM articletopiactag WHERE article_id NOT IN (SELECT id FROM cachedarticle)"
+            ))
             session.commit()
         except Exception as e:
             logger.warning(f"[Migration] NULL backfill failed (may be expected on first run): {e}")
@@ -1110,6 +1147,7 @@ def _store_article_vectors(articles: List[dict], embeddings, collection_id: int)
                     url=article["link"],
                     embedding=blob,
                     ingested_at=datetime.datetime.now(),
+                    published_at=article.get("timestamp"),
                 )
                 session.add(av)
                 session.flush()
@@ -1120,6 +1158,8 @@ def _store_article_vectors(articles: List[dict], embeddings, collection_id: int)
             else:
                 existing.embedding = blob
                 existing.ingested_at = datetime.datetime.now()
+                if existing.published_at is None:
+                    existing.published_at = article.get("timestamp")
                 session.add(existing)
                 session.execute(text(
                     "UPDATE vec_articles SET embedding = :emb WHERE rowid = :rid"
@@ -1136,17 +1176,21 @@ def retrieve_historical_context(
     entity_names: Optional[List[str]] = None,
     filter_age: str = "24h",
     last_run: Optional[datetime.datetime] = None,
+    search_space: str = "digest",
 ) -> List[dict]:
-    """Hybrid entity+vector search against vec_articles, with LRU bookkeeping on hits.
+    """Vector search for historical context articles, with LRU bookkeeping on hits.
 
-    If entity_names are provided, first finds historical ArticleVector entries whose
-    CachedArticle source contains those entities (entity pre-filter), then ranks the
-    matching articles by vector distance to the cluster centroid. Falls back to pure
-    vector search when no entity matches are found.
+    search_space="digest": pure vector search against vec_articles (past digest source
+    articles for this collection). Entity pre-filter is skipped here because
+    ArticleEntity.article_id = CachedArticle.id, which is a different ID space from
+    ArticleVector.id — filtering by it would return nothing.
 
-    filter_age / last_run are used to exclude vectors ingested in the current
-    collection window — preventing articles from the most recent run from appearing
-    as historical context when a digest is re-run within the same period.
+    search_space="feed": entity-guided hybrid search against vec_cached_articles (all
+    subscription feed articles). Entity pre-filter works correctly here since both
+    ArticleEntity and ArticleEmbedding share the CachedArticle.id space. Generated
+    digest articles are excluded (is_generated=0) to avoid feeding LLM output as context.
+
+    filter_age / last_run exclude vectors from the current collection window.
     """
     if top_k <= 0:
         return []
@@ -1162,60 +1206,80 @@ def retrieve_historical_context(
     else:
         ingest_cutoff = None  # "all" — no restriction
 
-    # Entity pre-filter: find ArticleVector IDs that contain the cluster's key entities
-    entity_filter_ids: Optional[List[int]] = None
-    if entity_names:
-        try:
-            cutoff_ts = time.time() - 86400  # only look at articles older than 24h
-            with Session(engine) as ent_session:
-                rows = ent_session.exec(
-                    select(ArticleEntity.article_id)
-                    .join(CachedArticle, CachedArticle.id == ArticleEntity.article_id)
-                    .where(ArticleEntity.entity_text.in_(entity_names))
-                    .where(CachedArticle.published < cutoff_ts)
-                    .distinct()
-                ).all()
-                entity_filter_ids = list(rows) if rows else None
-        except Exception as e:
-            logger.warning(f"[RAG] Entity pre-filter failed: {e}")
-            entity_filter_ids = None
-
-    # Build the ingested_at filter clause for the SQL queries
-    ingest_clause = ""
-    ingest_params: dict = {}
-    if ingest_cutoff is not None:
-        ingest_clause = "AND av.ingested_at < :ingest_cutoff"
-        ingest_params["ingest_cutoff"] = ingest_cutoff.isoformat()
-
     with Session(engine) as session:
-        if entity_filter_ids:
-            # Narrow vector search to entity-matched articles
-            placeholders_in = ",".join(str(i) for i in entity_filter_ids)
-            result_proxy = session.execute(text(f"""
-                SELECT av.id, av.title, av.content, av.url,
-                       vec_distance_cosine(va.embedding, :qemb) AS distance
-                FROM vec_articles va
-                JOIN articlevector av ON av.id = va.rowid
-                WHERE va.collection_id = :cid
-                  AND av.id IN ({placeholders_in})
-                  {ingest_clause}
-                ORDER BY distance ASC
-                LIMIT :k
-            """), {"qemb": blob, "cid": collection_id, "k": top_k * 3, **ingest_params})
-        else:
-            # Pure vector search — original behaviour
-            result_proxy = session.execute(text(f"""
-                SELECT av.id, av.title, av.content, av.url,
-                       vec_distance_cosine(va.embedding, :qemb) AS distance
-                FROM vec_articles va
-                JOIN articlevector av ON av.id = va.rowid
-                WHERE va.collection_id = :cid
-                  {ingest_clause}
-                ORDER BY distance ASC
-                LIMIT :k
-            """), {"qemb": blob, "cid": collection_id, "k": top_k * 3, **ingest_params})
-        rows = result_proxy.fetchall()
+        if search_space == "feed":
+            # Entity pre-filter: single JOIN query — ArticleEntity and ArticleEmbedding both
+            # link to CachedArticle.id, so this correctly yields vec_cached_articles rowids.
+            entity_rowids: Optional[List[int]] = None
+            if entity_names:
+                try:
+                    cutoff_ts = time.time() - 86400
+                    raw = session.exec(
+                        select(ArticleEmbedding.id)
+                        .join(CachedArticle, CachedArticle.id == ArticleEmbedding.article_id)
+                        .join(ArticleEntity, ArticleEntity.article_id == CachedArticle.id)
+                        .where(ArticleEntity.entity_text.in_(entity_names))
+                        .where(CachedArticle.published < cutoff_ts)
+                        .distinct()
+                    ).all()
+                    entity_rowids = list(raw) if raw else None
+                except Exception as e:
+                    logger.warning(f"[RAG] Entity pre-filter failed: {e}")
 
+            feed_ingest_clause = ""
+            feed_params: dict = {"qemb": blob, "k": top_k * 3}
+            if ingest_cutoff is not None:
+                feed_ingest_clause = "AND ca.added_at < :ingest_cutoff"
+                feed_params["ingest_cutoff"] = ingest_cutoff.isoformat()
+
+            if entity_rowids:
+                placeholders_in = ",".join(str(i) for i in entity_rowids)
+                result_proxy = session.execute(text(f"""
+                    SELECT ae.id, ca.title, ca.display_body AS content, ca.link AS url,
+                           ca.published AS pub_ts,
+                           vec_distance_cosine(vc.embedding, :qemb) AS distance
+                    FROM vec_cached_articles vc
+                    JOIN articleembedding ae ON ae.id = vc.rowid
+                    JOIN cachedarticle ca ON ca.id = ae.article_id
+                    WHERE ca.is_generated = 0
+                      AND vc.rowid IN ({placeholders_in})
+                      {feed_ingest_clause}
+                    ORDER BY distance ASC
+                    LIMIT :k
+                """), feed_params)
+            else:
+                result_proxy = session.execute(text(f"""
+                    SELECT ae.id, ca.title, ca.display_body AS content, ca.link AS url,
+                           ca.published AS pub_ts,
+                           vec_distance_cosine(vc.embedding, :qemb) AS distance
+                    FROM vec_cached_articles vc
+                    JOIN articleembedding ae ON ae.id = vc.rowid
+                    JOIN cachedarticle ca ON ca.id = ae.article_id
+                    WHERE ca.is_generated = 0
+                      {feed_ingest_clause}
+                    ORDER BY distance ASC
+                    LIMIT :k
+                """), feed_params)
+
+        else:
+            ingest_clause = ""
+            ingest_params: dict = {}
+            if ingest_cutoff is not None:
+                ingest_clause = "AND av.ingested_at < :ingest_cutoff"
+                ingest_params["ingest_cutoff"] = ingest_cutoff.isoformat()
+
+            result_proxy = session.execute(text(f"""
+                SELECT av.id, av.title, av.content, av.url, av.published_at,
+                       vec_distance_cosine(va.embedding, :qemb) AS distance
+                FROM vec_articles va
+                JOIN articlevector av ON av.id = va.rowid
+                WHERE va.collection_id = :cid
+                  {ingest_clause}
+                ORDER BY distance ASC
+                LIMIT :k
+            """), {"qemb": blob, "cid": collection_id, "k": top_k * 3, **ingest_params})
+
+        rows = result_proxy.fetchall()
         results = []
         for row in rows:
             similarity = 1.0 - (row.distance / 2.0)
@@ -1224,23 +1288,40 @@ def retrieve_historical_context(
                 if len(results) >= top_k:
                     break
 
-        retrieved_ids = [r.id for r in results]
-        if retrieved_ids:
-            placeholders = ",".join(str(i) for i in retrieved_ids)
-            session.execute(text(
-                f"UPDATE articlevector "
-                f"SET last_retrieved_at = :now, retrieval_count = retrieval_count + 1 "
-                f"WHERE id IN ({placeholders})"
-            ), {"now": datetime.datetime.now()})
-            session.commit()
+        if search_space == "digest":
+            retrieved_ids = [r.id for r in results]
+            if retrieved_ids:
+                placeholders = ",".join(str(i) for i in retrieved_ids)
+                session.execute(text(
+                    f"UPDATE articlevector "
+                    f"SET last_retrieved_at = :now, retrieval_count = retrieval_count + 1 "
+                    f"WHERE id IN ({placeholders})"
+                ), {"now": datetime.datetime.now()})
+                session.commit()
 
     latency_ms = (time.time() - t0) * 1000
     logger.info(
-        f"[RAG] Vector search: {latency_ms:.1f}ms | "
+        f"[RAG] Vector search ({search_space}): {latency_ms:.1f}ms | "
         f"retrieved={len(results)}/{top_k} | "
         f"collection={collection_id}"
     )
-    return [{"title": r.title, "content": r.content, "url": r.url} for r in results]
+    return [{"title": r.title, "content": r.content, "url": r.url, "date": _fmt_hist_date(r)} for r in results]
+
+
+def _fmt_hist_date(r) -> Optional[str]:
+    src = getattr(r, 'pub_ts', None) or getattr(r, 'published_at', None)
+    if not src:
+        return None
+    try:
+        if isinstance(src, (int, float)):
+            return datetime.datetime.fromtimestamp(float(src)).strftime("%B %d, %Y")
+        if isinstance(src, str):
+            return datetime.datetime.fromisoformat(src).strftime("%B %d, %Y")
+        if isinstance(src, datetime.datetime):
+            return src.strftime("%B %d, %Y")
+    except Exception:
+        pass
+    return None
 
 
 def prune_stale_vectors(max_idle_days: int):
@@ -1388,6 +1469,7 @@ def demo_take_snapshot():
                 "rag_top_k": col.rag_top_k,
                 "rag_min_similarity": col.rag_min_similarity,
                 "rag_eviction_days": col.rag_eviction_days,
+                "rag_search_space": col.rag_search_space,
                 "category_name": cat_name,
                 "feeds": [f.url for f in col.feeds],
             })
@@ -3221,7 +3303,7 @@ def api_entities_popular(limit: int = 150):
 # --- Articles ---
 
 @app.get("/api/articles")
-def api_get_articles(category_id: str = "all", feed_id: str = None, limit: int = 200):
+def api_get_articles(category_id: str = "all", feed_id: str = None, limit: int = 200, topic_tag: str = None, entity_text: str = None):
     with Session(engine) as session:
         settings = get_settings(session)
         read_links = {r.item_link for r in session.exec(select(ReadItem)).all()}
@@ -3231,18 +3313,45 @@ def api_get_articles(category_id: str = "all", feed_id: str = None, limit: int =
             f"sub_{s.id}": s.auto_scrape
             for s in session.exec(select(Subscription)).all()
         }
-        effective_limit = min(limit, settings.pwa_offline_limit)
-        query = select(CachedArticle).order_by(CachedArticle.published.desc()).limit(effective_limit)
-        if feed_id:
-            query = query.where(CachedArticle.feed_id == feed_id)
-        elif category_id == "favorites":
-            if not fav_links:
-                return []
-            query = query.where(CachedArticle.link.in_(list(fav_links)))
-        elif category_id == "none":
-            query = query.where(CachedArticle.category_id == None)
-        elif category_id != "all":
-            query = query.where(CachedArticle.category_id == int(category_id))
+        if topic_tag:
+            tag_subq = (
+                select(ArticleTopicTag.article_id)
+                .join(TopicTag, TopicTag.id == ArticleTopicTag.tag_id)
+                .where(TopicTag.name == topic_tag, TopicTag.is_active == True)
+                .scalar_subquery()
+            )
+            query = (
+                select(CachedArticle)
+                .where(CachedArticle.id.in_(tag_subq))
+                .order_by(CachedArticle.published.desc())
+                .limit(1000)
+            )
+        elif entity_text:
+            entity_subq = (
+                select(ArticleEntity.article_id)
+                .where(ArticleEntity.entity_text == entity_text)
+                .distinct()
+                .scalar_subquery()
+            )
+            query = (
+                select(CachedArticle)
+                .where(CachedArticle.id.in_(entity_subq))
+                .order_by(CachedArticle.published.desc())
+                .limit(1000)
+            )
+        else:
+            effective_limit = min(limit, settings.pwa_offline_limit)
+            query = select(CachedArticle).order_by(CachedArticle.published.desc()).limit(effective_limit)
+            if feed_id:
+                query = query.where(CachedArticle.feed_id == feed_id)
+            elif category_id == "favorites":
+                if not fav_links:
+                    return []
+                query = query.where(CachedArticle.link.in_(list(fav_links)))
+            elif category_id == "none":
+                query = query.where(CachedArticle.category_id == None)
+            elif category_id != "all":
+                query = query.where(CachedArticle.category_id == int(category_id))
         db_articles = session.exec(query).all()
         # Bulk-fetch entities for all returned articles in one query
         article_ids = [a.id for a in db_articles]
@@ -3543,6 +3652,9 @@ def api_list_collections():
                 "name": col.name,
                 "slug": col.slug,
                 "schedule_time": col.schedule_time,
+                "schedule_frequency": col.schedule_frequency,
+                "schedule_day_of_week": col.schedule_day_of_week,
+                "schedule_day_of_month": col.schedule_day_of_month,
                 "last_run": col.last_run.isoformat() if col.last_run else None,
                 "is_generating": col.is_generating,
                 "is_active": col.is_active,
@@ -3556,6 +3668,7 @@ def api_list_collections():
                 "rag_top_k": col.rag_top_k,
                 "rag_min_similarity": col.rag_min_similarity,
                 "rag_eviction_days": col.rag_eviction_days,
+                "rag_search_space": col.rag_search_space,
                 "hdbscan_min_cluster_size": col.hdbscan_min_cluster_size,
                 "hdbscan_min_samples": col.hdbscan_min_samples,
                 "hdbscan_cluster_selection_epsilon": col.hdbscan_cluster_selection_epsilon,
@@ -3576,13 +3689,16 @@ def api_get_collection(cid: int):
         return {
             "id": col.id, "name": col.name, "slug": col.slug,
             "schedule_time": col.schedule_time,
+            "schedule_frequency": col.schedule_frequency,
+            "schedule_day_of_week": col.schedule_day_of_week,
+            "schedule_day_of_month": col.schedule_day_of_month,
             "last_run": col.last_run.isoformat() if col.last_run else None,
             "is_generating": col.is_generating, "is_active": col.is_active,
             "category_id": col.category_id, "focus_keywords": col.focus_keywords,
             "context_length": col.context_length, "filter_max_articles": col.filter_max_articles,
             "filter_age": col.filter_age, "max_articles_per_topic": col.max_articles_per_topic,
             "rag_top_k": col.rag_top_k, "rag_min_similarity": col.rag_min_similarity,
-            "rag_eviction_days": col.rag_eviction_days,
+            "rag_eviction_days": col.rag_eviction_days, "rag_search_space": col.rag_search_space,
             "hdbscan_min_cluster_size": col.hdbscan_min_cluster_size,
             "hdbscan_min_samples": col.hdbscan_min_samples,
             "hdbscan_cluster_selection_epsilon": col.hdbscan_cluster_selection_epsilon,
@@ -3719,6 +3835,9 @@ async def api_update_collection_settings(cid: int, request: Request):
         col.rag_top_k = int(data.get("rag_top_k", col.rag_top_k))
         col.rag_min_similarity = float(data.get("rag_min_similarity", col.rag_min_similarity))
         col.rag_eviction_days = int(data.get("rag_eviction_days", col.rag_eviction_days))
+        _rss = data.get("rag_search_space")
+        if _rss in ("digest", "feed"):
+            col.rag_search_space = _rss
         _hcs = data.get("hdbscan_min_cluster_size")
         if _hcs is not None:
             try: col.hdbscan_min_cluster_size = max(2, int(_hcs))
@@ -3734,6 +3853,17 @@ async def api_update_collection_settings(cid: int, request: Request):
         _hmeth = data.get("hdbscan_cluster_selection_method")
         if _hmeth in ("eom", "leaf"):
             col.hdbscan_cluster_selection_method = _hmeth
+        _freq = data.get("schedule_frequency")
+        if _freq in ("daily", "weekly", "monthly"):
+            col.schedule_frequency = _freq
+        _dow = data.get("schedule_day_of_week")
+        if _dow is not None:
+            try: col.schedule_day_of_week = max(0, min(6, int(_dow)))
+            except (ValueError, TypeError): pass
+        _dom = data.get("schedule_day_of_month")
+        if _dom is not None:
+            try: col.schedule_day_of_month = max(1, min(31, int(_dom)))
+            except (ValueError, TypeError): pass
         session.add(col)
         session.commit()
     return {"ok": True}
@@ -3924,18 +4054,27 @@ async def api_update_settings(request: Request):
 @app.get("/api/settings/topic-tags")
 def api_list_topic_tags():
     with Session(engine) as session:
-        tags = session.exec(select(TopicTag).order_by(TopicTag.created_at)).all()
+        rows = session.execute(text("""
+            SELECT t.id, t.name, t.threshold, t.is_active, t.positive_count, t.negative_count,
+                   COALESCE(COUNT(DISTINCT att.article_id), 0) AS article_count
+            FROM topictag t
+            LEFT JOIN articletopiactag att ON att.tag_id = t.id
+                AND att.article_id IN (SELECT id FROM cachedarticle)
+            GROUP BY t.id
+            ORDER BY t.created_at
+        """)).all()
         return [
             {
-                "id": t.id,
-                "name": t.name,
-                "threshold": t.threshold,
-                "is_active": t.is_active,
-                "positive_count": t.positive_count or 0,
-                "negative_count": t.negative_count or 0,
-                "is_ready": (t.positive_count or 0) >= MIN_POSITIVE_FOR_INFERENCE,
+                "id": r.id,
+                "name": r.name,
+                "threshold": r.threshold,
+                "is_active": r.is_active,
+                "positive_count": r.positive_count or 0,
+                "negative_count": r.negative_count or 0,
+                "is_ready": (r.positive_count or 0) >= MIN_POSITIVE_FOR_INFERENCE,
+                "article_count": r.article_count,
             }
-            for t in tags
+            for r in rows
         ]
 
 @app.post("/api/settings/topic-tags/retag")

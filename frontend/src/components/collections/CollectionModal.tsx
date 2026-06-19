@@ -25,6 +25,9 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
 
   // Settings state
   const [scheduleTime, setScheduleTime] = useState(collection.schedule_time);
+  const [scheduleFrequency, setScheduleFrequency] = useState<"daily" | "weekly" | "monthly">(collection.schedule_frequency ?? "daily");
+  const [scheduleDayOfWeek, setScheduleDayOfWeek] = useState(collection.schedule_day_of_week ?? 0);
+  const [scheduleDayOfMonth, setScheduleDayOfMonth] = useState(collection.schedule_day_of_month ?? 1);
   const [contextLength, setContextLength] = useState(collection.context_length);
   const [filterMaxArticles, setFilterMaxArticles] = useState(collection.filter_max_articles);
   const [maxPerTopic, setMaxPerTopic] = useState(collection.max_articles_per_topic);
@@ -33,6 +36,7 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
   const [ragTopK, setRagTopK] = useState(collection.rag_top_k);
   const [ragMinSim, setRagMinSim] = useState(collection.rag_min_similarity);
   const [ragEvictDays, setRagEvictDays] = useState(collection.rag_eviction_days);
+  const [ragSearchSpace, setRagSearchSpace] = useState<"digest" | "feed">(collection.rag_search_space);
   const [hdbscanMinClusterSize, setHdbscanMinClusterSize] = useState(collection.hdbscan_min_cluster_size);
   const [hdbscanMinSamples, setHdbscanMinSamples] = useState(collection.hdbscan_min_samples);
   const [hdbscanEpsilon, setHdbscanEpsilon] = useState(collection.hdbscan_cluster_selection_epsilon);
@@ -85,6 +89,9 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
     try {
       await collections.updateSettings(collection.id, {
         schedule_time: scheduleTime,
+        schedule_frequency: scheduleFrequency,
+        schedule_day_of_week: scheduleDayOfWeek,
+        schedule_day_of_month: scheduleDayOfMonth,
         context_length: contextLength,
         filter_max_articles: filterMaxArticles,
         max_articles_per_topic: maxPerTopic,
@@ -93,6 +100,7 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
         rag_top_k: ragTopK,
         rag_min_similarity: ragMinSim,
         rag_eviction_days: ragEvictDays,
+        rag_search_space: ragSearchSpace,
         hdbscan_min_cluster_size: hdbscanMinClusterSize,
         hdbscan_min_samples: hdbscanMinSamples,
         hdbscan_cluster_selection_epsilon: hdbscanEpsilon,
@@ -215,11 +223,40 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
           {tab === "settings" && (
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
-                <div>
+                <div className="min-w-0">
                   <label className={labelClass}>Schedule Time</label>
-                  <input type="time" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className={inputClass} />
+                  <input type="time" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className={`${inputClass} appearance-none`} />
                 </div>
-                <div>
+                <div className="min-w-0">
+                  <label className={labelClass}>Digest Frequency</label>
+                  <select value={scheduleFrequency} onChange={(e) => setScheduleFrequency(e.target.value as "daily" | "weekly" | "monthly")} className={inputClass}>
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                </div>
+                {scheduleFrequency === "weekly" && (
+                  <div className="col-span-2 min-w-0">
+                    <label className={labelClass}>Day of Week</label>
+                    <select value={scheduleDayOfWeek} onChange={(e) => setScheduleDayOfWeek(Number(e.target.value))} className={inputClass}>
+                      {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day, i) => (
+                        <option key={i} value={i}>{day}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {scheduleFrequency === "monthly" && (
+                  <div className="col-span-2 min-w-0">
+                    <label className={labelClass}>Day of Month</label>
+                    <select value={scheduleDayOfMonth} onChange={(e) => setScheduleDayOfMonth(Number(e.target.value))} className={inputClass}>
+                      {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                        <option key={d} value={d}>{d}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-muted-foreground/50 mt-1">Days beyond the month end run on the last day of that month.</p>
+                  </div>
+                )}
+                <div className="min-w-0">
                   <label className={labelClass}>Article Age</label>
                   <select value={filterAge} onChange={(e) => setFilterAge(e.target.value)} className={inputClass}>
                     <option value="all">All time</option>
@@ -227,15 +264,15 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
                     <option value="new">New since last run</option>
                   </select>
                 </div>
-                <div>
+                <div className="min-w-0">
                   <label className={labelClass}>Context Length (chars)</label>
                   <input type="number" value={contextLength} onChange={(e) => setContextLength(Number(e.target.value))} className={inputClass} />
                 </div>
-                <div>
+                <div className="min-w-0">
                   <label className={labelClass}>Max Articles</label>
                   <input type="number" value={filterMaxArticles} onChange={(e) => setFilterMaxArticles(Number(e.target.value))} className={inputClass} />
                 </div>
-                <div>
+                <div className="min-w-0">
                   <label className={labelClass}>Max Per Topic</label>
                   <input type="number" value={maxPerTopic} onChange={(e) => setMaxPerTopic(Number(e.target.value))} className={inputClass} />
                 </div>
@@ -261,6 +298,26 @@ export default function CollectionModal({ collection, onClose, allCategories }: 
                     <label className="text-xs text-muted/70 block mb-1">Evict (days)</label>
                     <input type="number" value={ragEvictDays} onChange={(e) => setRagEvictDays(Number(e.target.value))} className={inputClass} />
                   </div>
+                </div>
+                <div className="mt-2">
+                  <label className="text-xs text-muted/70 block mb-1">Search Space</label>
+                  <div className="flex gap-2">
+                    {([ ["digest", "Past Digests"], ["feed", "Feed Articles"] ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setRagSearchSpace(value)}
+                        className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ${ragSearchSpace === value ? "bg-primary text-white" : "bg-surface border border-border text-muted hover:border-primary/50"}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted/50 mt-1">
+                    {ragSearchSpace === "digest"
+                      ? "Retrieves source articles from previous digest runs — good for following a topic thread."
+                      : "Retrieves source articles from your subscription feeds — good for surfacing early-stage stories."}
+                  </p>
                 </div>
               </div>
 

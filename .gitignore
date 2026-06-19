@@ -39,3 +39,7 @@ next-env.d.ts
 # Misc (OS-specific)
 .DS_Store
 
+
+# Local agent + scratch
+.claude/
+test.db

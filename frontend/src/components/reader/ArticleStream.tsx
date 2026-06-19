@@ -36,19 +36,15 @@ export default function ArticleStream() {
     topicTags: [], entityTags: [],
   });
 
-  // Switch default filter when entering/leaving favorites view
+  // Sync tag browse selection into topic/entity filters; reset to "all" when a tag is active
   useEffect(() => {
-    setFilters((f) => ({ ...f, status: isFavoritesView ? "all" : "unread" }));
-  }, [isFavoritesView]);
-
-  // Sync tag browse selection into topic/entity filters
-  useEffect(() => {
-    setFilters((f) => ({ ...f, topicTags: selectedTagFilter ? [selectedTagFilter] : [] }));
-  }, [selectedTagFilter]);
-
-  useEffect(() => {
-    setFilters((f) => ({ ...f, entityTags: selectedEntityFilter ? [selectedEntityFilter] : [] }));
-  }, [selectedEntityFilter]);
+    setFilters((f) => ({
+      ...f,
+      topicTags: selectedTagFilter ? [selectedTagFilter] : [],
+      entityTags: selectedEntityFilter ? [selectedEntityFilter] : [],
+      status: (selectedTagFilter || selectedEntityFilter || isFavoritesView) ? "all" : "unread",
+    }));
+  }, [selectedTagFilter, selectedEntityFilter, isFavoritesView]);
 
   const [filterOpen, setFilterOpen] = useState(false);
   const [streamMenuOpen, setStreamMenuOpen] = useState(false);
@@ -68,8 +64,13 @@ export default function ArticleStream() {
   const feedDbId = isSubscriptionFeed ? parseInt(selectedFeedId!.split("_")[1]) : null;
 
   const { data: rawArticles = [], isLoading } = useQuery({
-    queryKey: ["articles", categoryId, feedId],
-    queryFn: () => articles.list({ category_id: categoryId, feed_id: feedId }),
+    queryKey: ["articles", categoryId, feedId, selectedTagFilter, selectedEntityFilter],
+    queryFn: () => articles.list({
+      category_id: categoryId,
+      feed_id: feedId,
+      topic_tag: selectedTagFilter ?? undefined,
+      entity_text: selectedEntityFilter ?? undefined,
+    }),
     refetchInterval: 60_000,
   });
 
