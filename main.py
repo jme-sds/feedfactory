@@ -352,6 +352,66 @@ def _sanitize_css_value(val: str) -> str:
     # Remove anything that could close a style block or inject HTML/JS
     return re.sub(r'[<>{};\\]', '', val)
 
+
+# --- HTML sanitization (third-party feed / scraped article content) ---
+# All article HTML is rendered client-side via dangerouslySetInnerHTML, so any
+# untrusted HTML (RSS item bodies, scraped pages) MUST be sanitized server-side.
+# nh3 (Rust/ammonia) strips <script>, event-handler attributes, and dangerous URL
+# schemes (javascript:, data:text/html, ...) that BeautifulSoup tag-stripping misses.
+import nh3
+
+# Tags allowed in any article body.
+_HTML_ALLOWED_TAGS = {
+    "p", "br", "hr", "div", "span", "blockquote", "pre", "code",
+    "ul", "ol", "li", "dl", "dt", "dd",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "strong", "b", "em", "i", "u", "s", "sub", "sup", "mark", "small",
+    "a", "img", "figure", "figcaption",
+    "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption",
+}
+
+# Feed bodies: no inline styles (source-controlled) — strip them.
+_FEED_ALLOWED_ATTRS = {
+    "a": {"href", "title", "target"},
+    "img": {"src", "alt", "title", "loading"},
+}
+
+# Scraped reader bodies: img/a styles are set server-side in scrape_article_html
+# (overwriting any source style before this runs), so allowing style on those two
+# tags preserves our layout without trusting source CSS.
+_READER_ALLOWED_ATTRS = {
+    "a": {"href", "title", "target", "style"},
+    "img": {"src", "alt", "title", "loading", "style"},
+}
+
+_HTML_URL_SCHEMES = {"http", "https", "mailto"}
+
+
+def sanitize_feed_html(raw: str) -> str:
+    """Sanitize untrusted RSS/feed HTML for safe client-side rendering."""
+    if not raw:
+        return raw or ""
+    return nh3.clean(
+        raw,
+        tags=_HTML_ALLOWED_TAGS,
+        attributes=_FEED_ALLOWED_ATTRS,
+        url_schemes=_HTML_URL_SCHEMES,
+        link_rel="noopener noreferrer nofollow",
+    )
+
+
+def sanitize_reader_html(raw: str) -> str:
+    """Sanitize scraped article HTML, preserving server-set img/link styling."""
+    if not raw:
+        return raw or ""
+    return nh3.clean(
+        raw,
+        tags=_HTML_ALLOWED_TAGS,
+        attributes=_READER_ALLOWED_ATTRS,
+        url_schemes=_HTML_URL_SCHEMES,
+        link_rel="noopener noreferrer nofollow",
+    )
+
 def _sanitize_slug(slug: str) -> str:
     """Ensure a slug is safe for use in filesystem paths — alphanumeric, hyphens, underscores only."""
     return re.sub(r'[^a-zA-Z0-9_-]', '', slug)
@@ -508,6 +568,7 @@ def sync_all_feeds():
                         for entry in feed.entries:
                             if not session.exec(select(CachedArticle).where(CachedArticle.link == entry.link)).first():
                                 body = entry.content[0].value if 'content' in entry and entry.content else entry.get('summary', '') or entry.get('description', '')
+                                body = sanitize_feed_html(body)
                                 session.add(CachedArticle(
                                     ui_id=str(hash(entry.link)), feed_id=f"sub_{sub.id}", link=entry.link, title=entry.title, display_body=body,
                                     published=parse_date(entry), source_title=title, source_color="#4CAF50",
@@ -2522,6 +2583,8 @@ def scrape_article_html(url: str) -> str:
     Fetch and parse an article via the Postlight parser sidecar, then sanitize HTML for safe rendering.
     Returns sanitized HTML.
     """
+    # SSRF guard: only fetch public http/https origins (blocks file://, internal hosts, etc.)
+    _assert_public_url(url)
     parser_api_url = f"http://parser:3000/parser?url={quote(url, safe='')}"
     response = requests.get(parser_api_url, timeout=30)
     response.raise_for_status()
@@ -2593,7 +2656,9 @@ def scrape_article_html(url: str) -> str:
             if attr in img.attrs:
                 del img[attr]
 
-    return header_image_html + str(soup)
+    # Final safety net: allow-list sanitize to drop any event handlers, javascript:
+    # URLs, or dangerous tags the transforms above didn't remove.
+    return sanitize_reader_html(header_image_html + str(soup))
 
 
 def html_to_plain_text(html: str) -> str:
@@ -2682,10 +2747,10 @@ def _batch_scrape_subscription(sub_id: int):
 def fetch_content(url: str = Form(...)):
     try:
         return scrape_article_html(url)
-    except Exception as e:
+    except Exception:
         import traceback
         logger.error(f"Scrape Error: {traceback.format_exc()}")
-        return f"<p style='color: #ff4444;'>Scrape Failed: {str(e)}</p>"
+        return "<p style='color: #ff4444;'>Scrape failed. See server logs for details.</p>"
 
 
 # ── Image proxy ────────────────────────────────────────────────────────────────
@@ -2709,32 +2774,50 @@ def _cache_put(url_hash: str, content_type: str, data: bytes):
     _IMAGE_CACHE_ORDER.append(url_hash)
 
 
-@app.get("/reader/image_proxy")
-def image_proxy(url: str):
-    """Server-side image proxy: fetches remote images to bypass hotlink/CORS restrictions."""
-    # Validate scheme
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid URL")
-
+def _assert_public_url(url: str) -> None:
+    """SSRF guard: raise HTTPException unless url is http/https resolving only to public
+    IPs. Validates every address the host resolves to (IPv4 and IPv6)."""
+    parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise HTTPException(status_code=400, detail="Only http/https URLs are allowed")
-
     hostname = parsed.hostname or ""
     if not hostname:
         raise HTTPException(status_code=400, detail="Invalid URL: no hostname")
-
-    # SSRF guard: block requests to private/loopback addresses
     try:
-        resolved_ip = socket.gethostbyname(hostname)
-        ip_obj = ipaddress.ip_address(resolved_ip)
-        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
-            raise HTTPException(status_code=403, detail="Access to private addresses forbidden")
-    except HTTPException:
-        raise
+        infos = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
     except Exception:
-        raise HTTPException(status_code=502, detail="Could not resolve image host")
+        raise HTTPException(status_code=502, detail="Could not resolve host")
+    for info in infos:
+        ip_str = info[4][0]
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local
+                or ip_obj.is_reserved or ip_obj.is_multicast or ip_obj.is_unspecified):
+            raise HTTPException(status_code=403, detail="Access to private addresses forbidden")
+
+
+def _fetch_guarded(url: str, *, max_redirects: int = 4, **kwargs):
+    """requests.get with redirects followed manually, re-running the SSRF guard on every
+    hop so a public URL can't 302-redirect into an internal address."""
+    for _ in range(max_redirects + 1):
+        _assert_public_url(url)
+        resp = requests.get(url, allow_redirects=False, **kwargs)
+        if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("location"):
+            next_url = urljoin(url, resp.headers["location"])
+            resp.close()
+            url = next_url
+            continue
+        return resp
+    raise HTTPException(status_code=502, detail="Too many redirects")
+
+
+@app.get("/reader/image_proxy")
+def image_proxy(url: str):
+    """Server-side image proxy: fetches remote images to bypass hotlink/CORS restrictions."""
+    # SSRF guard (scheme + resolved-IP validation); redirects are re-validated per hop below.
+    _assert_public_url(url)
 
     # Cache lookup
     url_hash = hashlib.sha256(url.encode()).hexdigest()
@@ -2747,8 +2830,9 @@ def image_proxy(url: str):
 
     # Fetch from origin
     try:
-        r = requests.get(url, headers=_PROXY_HEADERS, timeout=15,
-                         allow_redirects=True, stream=True)
+        r = _fetch_guarded(url, headers=_PROXY_HEADERS, timeout=15, stream=True)
+    except HTTPException:
+        raise
     except requests.exceptions.RequestException as exc:
         logger.warning(f"Image proxy fetch failed for {url}: {exc}")
         raise HTTPException(status_code=502, detail="Failed to fetch image")
@@ -4237,18 +4321,55 @@ async def api_test_llm(request: Request):
         raise HTTPException(status_code=403, detail="Connection testing disabled in demo mode")
     data = await request.json()
     with Session(engine) as session:
-        settings = get_settings(session)
-        if data.get("api_endpoint"):
-            settings.api_endpoint = data["api_endpoint"]
-        if data.get("api_key"):
-            settings.api_key = data["api_key"]
-        if data.get("model_name"):
-            settings.model_name = data["model_name"]
+        stored = get_settings(session)
+        stored_endpoint, stored_key, stored_model = stored.api_endpoint, stored.api_key, stored.model_name
+
+    endpoint = data.get("api_endpoint") or stored_endpoint
+    model = data.get("model_name") or stored_model
+    req_key = data.get("api_key")
+    # Only reuse the stored provider key when testing the already-saved endpoint. Never
+    # send it to a caller-supplied endpoint — that would exfiltrate the key via SSRF.
+    if req_key:
+        key = req_key
+    elif _get_api_base_url(endpoint) == _get_api_base_url(stored_endpoint):
+        key = stored_key
+    else:
+        key = None
+
+    # Build a throwaway config object (not attached to any session) for the test call.
+    cfg = GlobalSettings(api_endpoint=endpoint, api_key=key, model_name=model)
     try:
-        res = call_llm(settings, "Reply with 'Connection successful!' and nothing else.", "You are a helpful assistant.")
+        res = call_llm(cfg, "Reply with 'Connection successful!' and nothing else.", "You are a helpful assistant.")
         return {"ok": True, "message": res}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+def backup_database():
+    """Return a transactionally-consistent snapshot of the SQLite DB as a download.
+
+    Uses `VACUUM INTO` so the copy is coherent even while WAL writes are in flight,
+    then streams the temp file and deletes it once the response is sent.
+    """
+    import tempfile
+    from starlette.background import BackgroundTask
+
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="feedfactory-backup-")
+    os.close(fd)
+    os.remove(tmp_path)  # VACUUM INTO requires the destination not to exist
+
+    # tmp_path is server-generated (mkstemp), but escape quotes defensively anyway.
+    safe_path = tmp_path.replace("'", "''")
+    with engine.connect() as conn:
+        conn.exec_driver_sql(f"VACUUM INTO '{safe_path}'")
+
+    return FileResponse(
+        tmp_path,
+        media_type="application/octet-stream",
+        filename=f"feedfactory-backup-{ts}.db",
+        background=BackgroundTask(lambda: os.path.exists(tmp_path) and os.remove(tmp_path)),
+    )
+
 
 @app.get("/api/settings/backup")
 def api_backup_database():
@@ -4270,6 +4391,8 @@ async def api_restore_database(file: UploadFile = File(...)):
 
 @app.post("/api/settings/test_embedding")
 async def api_test_embedding(request: Request):
+    if DEMO_MODE:
+        raise HTTPException(status_code=403, detail="Connection testing disabled in demo mode")
     data = await request.json()
     source = data.get("embed_source", "local")
     if source == "local":
@@ -4284,12 +4407,14 @@ async def api_test_embedding(request: Request):
         return {"ok": False, "message": "Endpoint is required"}
     endpoint = endpoint_base if endpoint_base.endswith("/embeddings") else endpoint_base + "/embeddings"
     api_key = str(data.get("embed_api_key", ""))
-    # When mirroring the generative model, the key is never sent from the browser —
-    # resolve it server-side from the stored generative settings instead.
+    # When mirroring the generative model, resolve BOTH endpoint and key from the stored
+    # generative settings — never send the stored key to a caller-supplied endpoint.
     if not api_key and data.get("embed_same_as_generative"):
         with Session(engine) as session:
             stored = get_settings(session)
-            api_key = stored.api_key or ""
+        stored_base = _get_api_base_url(stored.api_endpoint)
+        endpoint = stored_base if stored_base.endswith("/embeddings") else stored_base + "/embeddings"
+        api_key = stored.api_key or ""
     model_name = clean_model_id(str(data.get("embed_model_name", "")))
     if not model_name:
         return {"ok": False, "message": "Model name is required"}

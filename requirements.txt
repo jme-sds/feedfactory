@@ -5,6 +5,7 @@ sqlmodel
 requests
 openai
 beautifulsoup4
+nh3
 feedparser
 python-multipart
 apscheduler
