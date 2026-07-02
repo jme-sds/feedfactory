@@ -6,6 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 FeedFactory is a hybrid RSS feed aggregator and AI-powered news digest generator. It fetches RSS feeds, clusters articles semantically using embeddings + K-means, and synthesizes per-topic summaries via an OpenAI-compatible LLM API. Digests are republished as RSS feeds for downstream consumption.
 
+## Planned follow-ups (open work)
+
+Proposed but not-yet-started hardening from the 2026-07 security review live in
+`docs/followups/` — read these before touching CSRF or auth:
+- `docs/followups/csrf-token-redesign.md` — replace the JS-readable double-submit CSRF
+  token with request-origin verification (optional; do the Next-proxy header check first).
+- `docs/followups/cf-access-jwt-verification.md` — opt-in validation of the Cloudflare
+  Access JWT as app-layer defense-in-depth (fail-open when unconfigured).
+
 ## Commands
 
 ### Backend (FastAPI)
