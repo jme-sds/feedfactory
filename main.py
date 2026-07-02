@@ -2533,8 +2533,76 @@ class DemoAuthMiddleware(BaseHTTPMiddleware):
             return Response(content='{"detail":"Unauthorized"}', status_code=401, media_type="application/json")
         return StarletteRedirect("/login", status_code=303)
 
+# --- Rate limiting (defense-in-depth for expensive / outbound-heavy endpoints) ---
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets: dict = {}  # (client_ip, bucket) -> [window_start_ts, count]
+
+# bucket_name -> (max_calls, window_seconds). Only mutating requests are limited.
+_RATE_LIMITS = {
+    "summarize": (12, 60),
+    "fetch_content": (40, 60),
+    "test_conn": (12, 60),
+    "reembed": (3, 300),
+    "trigger": (20, 60),
+    "restore": (3, 300),
+}
+
+
+def _client_ip(request) -> str:
+    """Best-effort real client IP — the edge (CrowdSec/edge-nginx) forwards it."""
+    fwd = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limit_bucket(path: str) -> Optional[str]:
+    """Map a request path to a rate-limit bucket name, or None if unlimited."""
+    if path in ("/api/articles/summarize", "/api/articles/summarize_bulk"):
+        return "summarize"
+    if path in ("/api/reader/fetch_content", "/reader/fetch_content"):
+        return "fetch_content"
+    if path in ("/api/settings/test_llm", "/api/settings/test_embedding"):
+        return "test_conn"
+    if path == "/api/settings/reembed":
+        return "reembed"
+    if path == "/api/settings/restore":
+        return "restore"
+    if path == "/api/collections/trigger_all":
+        return "trigger"
+    if path.startswith("/api/collections/") and path.endswith("/trigger"):
+        return "trigger"
+    return None
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.method not in _CSRF_SAFE_METHODS:
+            bucket = _rate_limit_bucket(request.url.path)
+            if bucket is not None:
+                max_calls, window = _RATE_LIMITS[bucket]
+                key = (_client_ip(request), bucket)
+                now = time.time()
+                with _rate_limit_lock:
+                    entry = _rate_limit_buckets.get(key)
+                    if entry is None or now - entry[0] >= window:
+                        _rate_limit_buckets[key] = [now, 1]
+                    elif entry[1] >= max_calls:
+                        retry = int(window - (now - entry[0])) + 1
+                        return Response(
+                            content='{"detail":"Rate limit exceeded. Please slow down."}',
+                            status_code=429,
+                            media_type="application/json",
+                            headers={"Retry-After": str(retry)},
+                        )
+                    else:
+                        entry[1] += 1
+        return await call_next(request)
+
+
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(DemoAuthMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://frontend:3000"],
@@ -3573,7 +3641,7 @@ async def api_summarize_article(request: Request):
     )
     try:
         summary_html = call_llm(settings, f"Summarize this text:\n\n{text}", system_prompt)
-        summary_html = summary_html.replace("```html", "").replace("```", "").strip()
+        summary_html = sanitize_feed_html(summary_html.replace("```html", "").replace("```", "").strip())
         return {"summary": summary_html}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -3633,7 +3701,7 @@ async def api_summarize_bulk(request: Request):
     )
     try:
         summary_html = call_llm(settings, f"Summarize these articles together:\n\n{combined_text}", system_prompt)
-        summary_html = summary_html.replace("```html", "").replace("```", "").strip()
+        summary_html = sanitize_feed_html(summary_html.replace("```html", "").replace("```", "").strip())
         return {"summary": summary_html}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -4380,8 +4448,55 @@ async def api_restore_database(file: UploadFile = File(...)):
     if DEMO_MODE:
         raise HTTPException(status_code=403, detail="Restore disabled in demo mode")
     content = await file.read()
-    with open(DB_FILE, "wb") as f:
-        f.write(content)
+
+    # Validate the upload is actually a SQLite 3 database before touching the live DB.
+    if not content.startswith(b"SQLite format 3\x00"):
+        raise HTTPException(status_code=400, detail="Not a valid SQLite database file")
+
+    import tempfile
+    import sqlite3
+    fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="feedfactory-restore-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+
+        # Integrity + shape check on the uploaded file (must be a readable FeedFactory DB).
+        try:
+            probe = sqlite3.connect(tmp_path)
+            integrity = probe.execute("PRAGMA integrity_check").fetchone()
+            has_core = probe.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cachedarticle'"
+            ).fetchone()
+            probe.close()
+        except sqlite3.DatabaseError:
+            raise HTTPException(status_code=400, detail="Uploaded file is not a readable SQLite database")
+        if not integrity or integrity[0] != "ok":
+            raise HTTPException(status_code=400, detail="Uploaded database failed integrity check")
+        if not has_core or has_core[0] == 0:
+            raise HTTPException(status_code=400, detail="Uploaded database is missing expected FeedFactory tables")
+
+        # Snapshot the current DB first so a bad restore is recoverable.
+        if os.path.exists(DB_FILE):
+            ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            try:
+                shutil.copy2(DB_FILE, f"{DB_FILE}.pre-restore-{ts}")
+            except OSError as e:
+                logger.warning(f"[Restore] Could not snapshot current DB: {e}")
+
+        # Replace the live DB, then drop the old WAL/SHM sidecars so SQLite doesn't
+        # reapply stale journal contents over the restored file.
+        shutil.move(tmp_path, DB_FILE)
+        tmp_path = None
+        for sidecar in (DB_FILE + "-wal", DB_FILE + "-shm"):
+            try:
+                if os.path.exists(sidecar):
+                    os.remove(sidecar)
+            except OSError:
+                pass
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
     return {"ok": True, "message": "Database restored. Please restart the container."}
 
 
